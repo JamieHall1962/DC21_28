@@ -1,0 +1,273 @@
+{% extends "base.html" %}
+
+{% block title %}Positions - SPX Calendar Trading{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-12">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <div>
+                    <h1><i class="fas fa-list me-2"></i>Active Positions</h1>
+                    <p class="text-muted">Manage your SPX Double Calendar spreads</p>
+                </div>
+                <div>
+                    <a href="{{ url_for('manual_trade') }}" class="btn btn-primary">
+                        <i class="fas fa-plus me-1"></i>Manual Trade
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Manual Control Reminders -->
+    {% set manual_trades = trades|selectattr("status", "equalto", "MANUAL_CONTROL")|list %}
+    {% if manual_trades %}
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="alert alert-warning d-flex align-items-center" role="alert">
+                    <i class="fas fa-hand-paper fa-2x me-3"></i>
+                    <div class="flex-grow-1">
+                        <h5 class="mb-2">🚨 Action Required - Manual Control Trades</h5>
+                        <p class="mb-2">These trades need closing data entered to complete your records:</p>
+                        <div class="row">
+                            {% for trade in manual_trades %}
+                                <div class="col-md-6 col-lg-4 mb-2">
+                                    <div class="d-flex justify-content-between align-items-center p-2 bg-warning bg-opacity-25 rounded">
+                                        <div>
+                                            <strong>{{ trade.trade_id }}</strong><br>
+                                            <small>{{ trade.days_since_entry }} days old</small>
+                                        </div>
+                                        <button type="button" class="btn btn-warning btn-sm" 
+                                                data-bs-toggle="modal" data-bs-target="#manualCloseModal{{ trade.trade_id }}">
+                                            <i class="fas fa-edit"></i> Enter Data
+                                        </button>
+                                    </div>
+                                </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% endif %}
+
+    {% if trades %}
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th class="small">ID</th>
+                                        <th>Entry Date</th>
+                                        <th>Entry Price</th>
+                                        <th>Current Price</th>
+                                        <th>Exit Target</th>
+                                        <th>Strikes & Expiry</th>
+                                        <th>Days</th>
+                                        <th>P&L</th>
+                                        <th>Status</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for trade in trades %}
+                                        {% set pnl_total = trade.pnl_total if trade.pnl_total else 0 %}
+                                        {% set has_pnl = trade.unrealized_pnl and trade.unrealized_pnl != 0 %}
+                                        
+                                        <tr class="{{ 'table-success' if trade.unrealized_pnl > 50 else 'table-danger' if trade.unrealized_pnl < -50 else '' }}">
+                                            <td class="small">
+                                                <code class="text-muted small">{{ trade.trade_id }}</code>
+                                            </td>
+                                            <td>
+                                                <div><strong>{{ trade.entry_date }}</strong></div>
+                                                <div class="small text-muted">{{ trade.entry_time }}</div>
+                                            </td>
+                                            <td>
+                                                <div class="fw-bold">{{ "%.2f"|format(trade.entry_credit) }}</div>
+                                                <div class="small text-muted">Entry Price</div>
+                                            </td>
+                                            <td>
+                                                <div class="current-price text-info fw-bold">
+                                                    {{ "%.2f"|format(trade.current_spread_price) if trade.current_spread_price else 'Loading...' }}
+                                                </div>
+                                                <div class="small text-muted">Live Price</div>
+                                            </td>
+                                            <td>
+                                                <div><strong>{{ "%.1f"|format(trade.profit_target) }}</strong></div>
+                                                <div class="small text-muted">or {{ trade.exit_date_display }}</div>
+                                            </td>
+                                            <td>
+                                                <div class="small">
+                                                    <strong>{{ trade.put_strike|int }}P / {{ trade.call_strike|int }}C</strong>
+                                                </div>
+                                                <div class="small text-muted">
+                                                    {{ trade.short_expiry_display }}/{{ trade.long_expiry_display }}
+                                                </div>
+                                            </td>
+                                            <td>
+                                                <div><strong>{{ trade.days_since_entry }}d</strong></div>
+                                                <div class="small text-muted">{{ trade.days_to_expiry }}d exp</div>
+                                            </td>
+                                            <td>
+                                                {% if has_pnl %}
+                                                    <div class="fw-bold {{ 'profit-positive' if trade.unrealized_pnl > 0 else 'profit-negative' }}">
+                                                        {{ "{:,.0f}".format(pnl_total) }}
+                                                    </div>
+                                                    <div class="small {{ 'profit-positive' if trade.unrealized_pnl > 0 else 'profit-negative' }}">
+                                                        {{ "%.1f"|format((trade.unrealized_pnl / abs(trade.entry_credit)) * 100) }}%
+                                                    </div>
+                                                {% else %}
+                                                    <div class="fw-bold text-muted">{{ "{:,.0f}".format(pnl_total) }}</div>
+                                                    <div class="small text-muted">0.0%</div>
+                                                {% endif %}
+                                            </td>
+                                            <td>
+                                                <span class="badge bg-{{ 'success' if trade.status == 'ACTIVE' else ('warning' if trade.status == 'MANUAL_CONTROL' else 'secondary') }}">
+                                                    {{ trade.status }}
+                                                </span>
+                                            </td>
+                                            <td>
+                                                <div class="d-flex gap-1">
+                                                    {% if trade.status == 'ACTIVE' %}
+                                                        <form method="POST" action="{{ url_for('close_position', trade_id=trade.trade_id) }}" 
+                                                              onsubmit="return confirm('Close {{ trade.trade_id }}?');" class="d-inline">
+                                                            <button type="submit" class="btn btn-danger btn-sm" title="Close Position">
+                                                                <i class="fas fa-times"></i>
+                                                            </button>
+                                                        </form>
+                                                        <form method="POST" action="{{ url_for('stop_managing', trade_id=trade.trade_id) }}" 
+                                                              onsubmit="return confirm('Stop managing {{ trade.trade_id }}?');" class="d-inline">
+                                                            <button type="submit" class="btn btn-warning btn-sm" title="Stop Managing">
+                                                                <i class="fas fa-hand-paper"></i>
+                                                            </button>
+                                                        </form>
+                                                    {% elif trade.status == 'MANUAL_CONTROL' %}
+                                                        <button type="button" class="btn btn-outline-primary btn-sm" 
+                                                                data-bs-toggle="modal" data-bs-target="#manualCloseModal{{ trade.trade_id }}" title="Record Manual Close">
+                                                            <i class="fas fa-edit"></i>
+                                                        </button>
+                                                    {% endif %}
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% else %}
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-body text-center py-5">
+                        <i class="fas fa-inbox fa-4x text-muted mb-3"></i>
+                        <h3>No Active Positions</h3>
+                        <p class="text-muted mb-4">
+                            The system will automatically create positions at 9:45 AM on trading days.<br>
+                            You can also execute a manual trade if market conditions are favorable.
+                        </p>
+                        <a href="{{ url_for('manual_trade') }}" class="btn btn-primary btn-lg">
+                            <i class="fas fa-play me-2"></i>Execute Manual Trade
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% endif %}
+</div>
+
+<!-- Manual Close Modals -->
+{% for trade in trades %}
+    {% if trade.status == 'MANUAL_CONTROL' %}
+        <div class="modal fade" id="manualCloseModal{{ trade.trade_id }}" tabindex="-1" 
+             aria-labelledby="manualCloseModalLabel{{ trade.trade_id }}" aria-hidden="true">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <form method="POST" action="{{ url_for('record_manual_close', trade_id=trade.trade_id) }}">
+                        <div class="modal-header">
+                            <h5 class="modal-title" id="manualCloseModalLabel{{ trade.trade_id }}">
+                                Record Manual Close - {{ trade.trade_id }}
+                            </h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="mb-3">
+                                <label class="form-label">Trade Details</label>
+                                    <div class="bg-light p-3 rounded">
+                                        <div class="row">
+                                            <div class="col-6">
+                                                <small class="text-muted">Entry Price</small>
+                                                <div class="fw-bold">{{ "%.2f"|format(trade.entry_credit) }}</div>
+                                            </div>
+                                            <div class="col-6">
+                                                <small class="text-muted">Strikes</small>
+                                                <div class="fw-bold">{{ trade.put_strike|int }}P / {{ trade.call_strike|int }}C</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label for="exitPrice{{ trade.trade_id }}" class="form-label">Exit Price *</label>
+                                <input type="number" class="form-control" id="exitPrice{{ trade.trade_id }}" 
+                                       name="exit_price" step="0.01" min="0" required 
+                                       placeholder="Enter exit price (e.g., 18.50)">
+                                <div class="form-text">Enter the price you received for closing the spread in TWS</div>
+                            </div>
+                            
+                            <div class="row">
+                                <div class="col-6">
+                                    <label for="exitDate{{ trade.trade_id }}" class="form-label">Exit Date *</label>
+                                    <input type="date" class="form-control" id="exitDate{{ trade.trade_id }}" 
+                                           name="exit_date" required>
+                                </div>
+                                <div class="col-6">
+                                    <label for="exitTime{{ trade.trade_id }}" class="form-label">Exit Time *</label>
+                                    <input type="time" class="form-control" id="exitTime{{ trade.trade_id }}" 
+                                           name="exit_time" required>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                            <button type="submit" class="btn btn-primary">Record Close</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    {% endif %}
+{% endfor %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Auto-refresh positions every 60 seconds
+    setTimeout(function() {
+        location.reload();
+    }, 60000);
+    
+    // Auto-populate current date/time for manual close modals
+    document.addEventListener('DOMContentLoaded', function() {
+        const now = new Date();
+        const today = now.toISOString().split('T')[0];
+        const currentTime = now.toTimeString().slice(0, 5);
+        
+        document.querySelectorAll('input[name="exit_date"]').forEach(input => {
+            if (!input.value) input.value = today;
+        });
+        
+        document.querySelectorAll('input[name="exit_time"]').forEach(input => {
+            if (!input.value) input.value = currentTime;
+        });
+    });
+</script>
+{% endblock %}

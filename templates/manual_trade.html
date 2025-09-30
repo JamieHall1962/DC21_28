@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+
+{% block title %}Manual Trade - SPX Calendar Trading{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="row justify-content-center">
+        <div class="col-lg-8">
+            <div class="card">
+                <div class="card-header">
+                    <h4 class="mb-0"><i class="fas fa-play me-2"></i>Manual Trade Execution</h4>
+                </div>
+                <div class="card-body">
+                    <div class="alert alert-warning" role="alert">
+                        <i class="fas fa-exclamation-triangle me-2"></i>
+                        <strong>Manual Override:</strong> This will execute the same logic as the automated 9:45 AM routine.
+                        The system will find 20Δ strikes, verify contracts exist, and attempt to place the 4-leg calendar spread.
+                    </div>
+
+                    <form method="POST">
+                        <div class="row mb-4">
+                            <div class="col-md-6">
+                                <h6><i class="fas fa-info-circle me-2"></i>Trade Parameters</h6>
+                                <ul class="list-unstyled">
+                                    <li><strong>Strategy:</strong> SPX Double Calendar Spread</li>
+                                    <li><strong>Position Size:</strong> 4 contracts per leg</li>
+                                    <li><strong>Target Delta:</strong> ~20Δ for puts and calls</li>
+                                    <li><strong>Expiration:</strong> 21-day short, 28-day long</li>
+                                </ul>
+                            </div>
+                            <div class="col-md-6">
+                                <h6><i class="fas fa-cogs me-2"></i>Execution Process</h6>
+                                <ol class="small">
+                                    <li>Get current SPX price</li>
+                                    <li>Calculate 21-day and 28-day expiries</li>
+                                    <li>Find 20Δ put and call strikes</li>
+                                    <li>Verify all contracts exist</li>
+                                    <li>Place 4-leg spread order at mid-price</li>
+                                    <li>Apply price improvement logic</li>
+                                </ol>
+                            </div>
+                        </div>
+
+                        <div class="alert alert-info" role="alert">
+                            <h6><i class="fas fa-chart-line me-2"></i>Current Market Check</h6>
+                            <p class="mb-2">Before executing, ensure:</p>
+                            <ul class="mb-0">
+                                <li>Market is open and liquid</li>
+                                <li>SPX options are trading normally</li>
+                                <li>You have sufficient buying power</li>
+                                <li>IBKR connection is stable</li>
+                            </ul>
+                        </div>
+
+                        <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+                            <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary me-md-2">
+                                <i class="fas fa-arrow-left me-1"></i>Cancel
+                            </a>
+                            <button type="submit" class="btn btn-primary" onclick="return confirmTrade()">
+                                <i class="fas fa-play me-1"></i>Execute Trade
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Trade History Preview -->
+    <div class="row justify-content-center mt-4">
+        <div class="col-lg-8">
+            <div class="card">
+                <div class="card-header">
+                    <h6 class="mb-0"><i class="fas fa-history me-2"></i>Recent Manual Trades</h6>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted text-center">Manual trade history will appear here after execution.</p>
+                    <div class="text-center">
+                        <a href="{{ url_for('trade_history') }}" class="btn btn-outline-primary btn-sm">
+                            View Full Trade History
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function confirmTrade() {
+    return confirm(
+        "Are you sure you want to execute a manual SPX Calendar spread trade?\n\n" +
+        "This will:\n" +
+        "• Find current 20Δ strikes\n" +
+        "• Place a 4-lot calendar spread order\n" +
+        "• Use real money in your IBKR account\n\n" +
+        "Click OK to proceed or Cancel to abort."
+    );
+}
+</script>
+{% endblock %}

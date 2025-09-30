@@ -1,0 +1,241 @@
+{% extends "base.html" %}
+
+{% block title %}System Status - SPX Calendar Trading{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-12">
+            <h1><i class="fas fa-cog me-2"></i>System Status & Configuration</h1>
+            <p class="text-muted">Monitor and manage your trading system settings</p>
+        </div>
+    </div>
+
+    <div class="row">
+        <!-- IBKR Connection Status -->
+        <div class="col-lg-6 mb-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="fas fa-plug me-2"></i>IBKR Connection</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row align-items-center">
+                        <div class="col-8">
+                            <div class="d-flex align-items-center mb-2">
+                                <i class="fas fa-circle {{ 'status-connected' if system_info.ibkr_connected else 'status-disconnected' }} me-2"></i>
+                                <span class="fw-bold">
+                                    {{ 'Connected' if system_info.ibkr_connected else 'Disconnected' }}
+                                </span>
+                            </div>
+                            <small class="text-muted">
+                                Host: {{ system_info.ibkr_host }}:{{ system_info.ibkr_port }}<br>
+                                Client ID: {{ system_info.client_id }}
+                            </small>
+                        </div>
+                        <div class="col-4 text-end">
+                            {% if system_info.ibkr_connected %}
+                                <form method="POST" action="{{ url_for('disconnect_ibkr') }}">
+                                    <button type="submit" class="btn btn-outline-danger btn-sm">
+                                        <i class="fas fa-unlink me-1"></i>Disconnect
+                                    </button>
+                                </form>
+                            {% else %}
+                                <form method="POST" action="{{ url_for('connect_ibkr') }}">
+                                    <button type="submit" class="btn btn-outline-success btn-sm">
+                                        <i class="fas fa-link me-1"></i>Connect
+                                    </button>
+                                </form>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Automated Scheduler -->
+        <div class="col-lg-6 mb-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="fas fa-robot me-2"></i>Automated Scheduler</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row align-items-center">
+                        <div class="col-8">
+                            <div class="d-flex align-items-center mb-2">
+                                <i class="fas fa-circle {{ 'status-connected' if system_info.scheduler_running else 'status-disconnected' }} me-2"></i>
+                                <span class="fw-bold">
+                                    {{ 'Running' if system_info.scheduler_running else 'Stopped' }}
+                                </span>
+                            </div>
+                            <small class="text-muted">
+                                Daily execution: 9:45 AM ET (M-F)<br>
+                                Position checks: Hourly during market hours
+                            </small>
+                        </div>
+                        <div class="col-4 text-end">
+                            {% if system_info.scheduler_running %}
+                                <form method="POST" action="{{ url_for('stop_scheduler_route') }}">
+                                    <button type="submit" class="btn btn-outline-danger btn-sm">
+                                        <i class="fas fa-stop me-1"></i>Stop
+                                    </button>
+                                </form>
+                            {% else %}
+                                <form method="POST" action="{{ url_for('start_scheduler_route') }}">
+                                    <button type="submit" class="btn btn-outline-success btn-sm">
+                                        <i class="fas fa-play me-1"></i>Start
+                                    </button>
+                                </form>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <!-- Trading Configuration -->
+        <div class="col-lg-6 mb-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="fas fa-chart-line me-2"></i>Trading Configuration</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-6">
+                            <div class="mb-3">
+                                <small class="text-muted">Max Positions</small>
+                                <div class="fw-bold">{{ system_info.max_positions }}</div>
+                            </div>
+                            <div class="mb-3">
+                                <small class="text-muted">Position Size</small>
+                                <div class="fw-bold">{{ system_info.position_size }} contracts</div>
+                            </div>
+                        </div>
+                        <div class="col-6">
+                            <div class="mb-3">
+                                <small class="text-muted">Target Delta</small>
+                                <div class="fw-bold">{{ system_info.target_delta }}</div>
+                            </div>
+                            <div class="mb-3">
+                                <small class="text-muted">Profit Target</small>
+                                <div class="fw-bold">{{ system_info.profit_target }}</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <!-- Schedule Configuration -->
+        <div class="col-lg-6 mb-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="fas fa-clock me-2"></i>Schedule Configuration</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-6">
+                            <div class="mb-3">
+                                <small class="text-muted">Entry Time</small>
+                                <div class="fw-bold">{{ system_info.entry_time }} ET</div>
+                            </div>
+                        </div>
+                        <div class="col-6">
+                            <div class="mb-3">
+                                <small class="text-muted">Exit Time</small>
+                                <div class="fw-bold">{{ system_info.exit_time }} ET</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <small class="text-muted">Exit Day</small>
+                        <div class="fw-bold">Day {{ system_info.exit_day }} after entry</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- System Information -->
+        <div class="col-lg-6 mb-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="fas fa-info-circle me-2"></i>System Information</h5>
+                </div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <small class="text-muted">Database Path</small>
+                        <div class="fw-bold small">{{ system_info.database_path }}</div>
+                    </div>
+                    <div class="mb-3">
+                        <small class="text-muted">SMS Notifications</small>
+                        <div class="fw-bold">{{ system_info.notification_number }}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- System Health Check -->
+    <div class="row">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="fas fa-heartbeat me-2"></i>System Health Check</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-3 text-center mb-3">
+                            <div class="card bg-light">
+                                <div class="card-body">
+                                    <i class="fas fa-{{ 'check-circle text-success' if system_info.ibkr_connected else 'times-circle text-danger' }} fa-2x mb-2"></i>
+                                    <h6>IBKR Connection</h6>
+                                    <small class="text-muted">{{ 'Healthy' if system_info.ibkr_connected else 'Offline' }}</small>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3 text-center mb-3">
+                            <div class="card bg-light">
+                                <div class="card-body">
+                                    <i class="fas fa-database text-success fa-2x mb-2"></i>
+                                    <h6>Database</h6>
+                                    <small class="text-muted">Operational</small>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3 text-center mb-3">
+                            <div class="card bg-light">
+                                <div class="card-body">
+                                    <i class="fas fa-sms text-success fa-2x mb-2"></i>
+                                    <h6>SMS Notifications</h6>
+                                    <small class="text-muted">Active</small>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3 text-center mb-3">
+                            <div class="card bg-light">
+                                <div class="card-body">
+                                    <i class="fas fa-cogs text-success fa-2x mb-2"></i>
+                                    <h6>Trading Engine</h6>
+                                    <small class="text-muted">Ready</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Auto-refresh system status every 30 seconds
+    setTimeout(function() {
+        location.reload();
+    }, 30000);
+</script>
+{% endblock %}

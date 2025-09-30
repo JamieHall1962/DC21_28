@@ -1,0 +1,26 @@
+# SPX Double Calendar Spread Trading System Requirements
+
+# Core trading and data handling
+pandas>=1.5.0
+numpy>=1.24.0
+schedule>=1.2.0
+pytz>=2023.3
+
+# Interactive Brokers API
+ibapi>=10.19.0
+
+# SMS notifications (uses built-in smtplib - no external dependencies needed!)
+# twilio>=8.2.0  # No longer needed - replaced with free email-to-SMS
+
+# Database
+sqlite3  # Built into Python
+
+# Logging and utilities
+requests>=2.31.0
+
+# Web interface
+flask>=2.3.0  # Web dashboard
+
+# Optional: For future enhancements
+# plotly>=5.15.0  # For charting
+# dash>=2.11.0  # For interactive web interface

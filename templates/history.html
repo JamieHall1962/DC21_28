@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+
+{% block title %}Trade History - SPX Calendar Trading{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-12">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <div>
+                    <h1><i class="fas fa-history me-2"></i>Trade History</h1>
+                    <p class="text-muted">Complete record of SPX Calendar spread trades</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% if trades %}
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th class="small">ID</th>
+                                        <th>Entry</th>
+                                        <th>Exit</th>
+                                        <th>Strikes & Expiry</th>
+                                        <th>Status</th>
+                                        <th>P&L</th>
+                                        <th>Return %</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for trade in trades %}
+                                        <tr>
+                                            <td class="small">
+                                                <code class="text-muted small">{{ trade.trade_id }}</code>
+                                            </td>
+                                            <td>
+                                                <div><strong>{{ trade.entry_date }}</strong> <span class="small text-muted">{{ trade.entry_time }}</span></div>
+                                                <div class="small">SPX: {{ "%.2f"|format(trade.spx_price) }} • Entry: {{ "%.2f"|format(trade.entry_credit) }}</div>
+                                            </td>
+                                            <td>
+                                                {% if trade.status == 'CLOSED' and trade.exit_date %}
+                                                    <div><strong>{{ trade.exit_date }}</strong> <span class="small text-muted">{{ trade.exit_time if trade.exit_time else '-' }}</span></div>
+                                                    <div class="small">SPX: {{ "%.2f"|format(trade.exit_spx_price) if trade.exit_spx_price else '-' }} • Exit: {{ "%.2f"|format(trade.exit_credit) if trade.exit_credit else '-' }}</div>
+                                                {% else %}
+                                                    <span class="text-muted">-</span>
+                                                {% endif %}
+                                            </td>
+                                            <td>
+                                                <div class="small">
+                                                    <strong>{{ trade.put_strike|int }}P / {{ trade.call_strike|int }}C</strong>
+                                                </div>
+                                                <div class="small text-muted">
+                                                    {{ trade.short_expiry_display }}/{{ trade.long_expiry_display }}
+                                                </div>
+                                            </td>
+                                            <td>
+                                                <span class="badge bg-{{ 
+                                                    'success' if trade.status == 'CLOSED' else
+                                                    'primary' if trade.status == 'ACTIVE' else
+                                                    'warning' if trade.status == 'PENDING' else
+                                                    'secondary'
+                                                }}">
+                                                    {{ trade.status }}
+                                                </span>
+                                                {% if trade.exit_reason %}
+                                                    <div class="small text-muted">{{ trade.exit_reason }}</div>
+                                                {% endif %}
+                                            </td>
+                                            <td>
+                                                {% if trade.actual_pnl is not none %}
+                                                    <strong class="{{ 'profit-positive' if trade.actual_pnl > 0 else 'profit-negative' if trade.actual_pnl < 0 else '' }}">
+                                                        {{ "%.0f"|format(trade.actual_pnl) }}
+                                                    </strong>
+                                                {% else %}
+                                                    <span class="text-muted">-</span>
+                                                {% endif %}
+                                            </td>
+                                            <td>
+                                                {% if trade.profit_pct %}
+                                                    <strong class="{{ 'profit-positive' if trade.profit_pct > 0 else 'profit-negative' if trade.profit_pct < 0 else '' }}">
+                                                        {{ "%.1f"|format(trade.profit_pct) }}%
+                                                    </strong>
+                                                {% else %}
+                                                    <span class="text-muted">-</span>
+                                                {% endif %}
+                                            </td>
+                                        </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Summary Statistics -->
+        <div class="row mt-4">
+            <div class="col-md-3">
+                <div class="card bg-light">
+                    <div class="card-body text-center">
+                        <h4>{{ trades|length }}</h4>
+                        <small class="text-muted">Total Trades</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-light">
+                    <div class="card-body text-center">
+                        {% set winning_trades = trades|selectattr('actual_pnl', '>', 0)|list %}
+                        <h4>{{ winning_trades|length }}</h4>
+                        <small class="text-muted">Winning Trades</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-light">
+                    <div class="card-body text-center">
+                        {% set closed_trades = trades|selectattr('status', 'equalto', 'CLOSED')|list %}
+                        {% if closed_trades %}
+                            {% set win_rate = (winning_trades|length / closed_trades|length * 100) %}
+                            <h4>{{ "%.1f"|format(win_rate) }}%</h4>
+                        {% else %}
+                            <h4>-</h4>
+                        {% endif %}
+                        <small class="text-muted">Win Rate</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-light">
+                    <div class="card-body text-center">
+                        {% set total_pnl = trades|selectattr('actual_pnl', 'defined')|map(attribute='actual_pnl')|sum %}
+                        <h4 class="{{ 'profit-positive' if total_pnl > 0 else 'profit-negative' if total_pnl < 0 else '' }}">
+                            {{ "%.0f"|format(total_pnl) }}
+                        </h4>
+                        <small class="text-muted">Total P&L</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% else %}
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-body text-center py-5">
+                        <i class="fas fa-history fa-4x text-muted mb-3"></i>
+                        <h3>No Trade History</h3>
+                        <p class="text-muted mb-4">
+                            No trades have been executed yet. The system will automatically<br>
+                            create trades at 9:45 AM on trading days, or you can execute manually.
+                        </p>
+                        <a href="{{ url_for('manual_trade') }}" class="btn btn-primary">
+                            <i class="fas fa-play me-2"></i>Execute First Trade
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% endif %}
+</div>
+{% endblock %}

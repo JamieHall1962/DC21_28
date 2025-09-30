@@ -1,0 +1,388 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - SPX Calendar Trading{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-12">
+            <h1><i class="fas fa-tachometer-alt me-2"></i>Trading Dashboard</h1>
+            <p class="text-muted">SPX Double Calendar Spread Automated Trading System</p>
+        </div>
+    </div>
+
+    <!-- Clean Header Section -->
+    <div class="row mb-3">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-body p-2">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <!-- Left: Title + Stats -->
+                        <div class="d-flex align-items-center">
+                            <h4 class="mb-0 me-4 text-primary">Trading Dashboard</h4>
+                            <div class="d-flex align-items-center text-muted">
+                                <span class="me-3 small">
+                                    <i class="fas fa-chart-pie me-1"></i>
+                                    <strong class="active-positions-count">{{ system_status.active_positions }}</strong>/{{ system_status.max_positions }} Positions
+                                </span>
+                                <span class="me-3 small">
+                                    <i class="fas fa-calendar-day me-1"></i>
+                                    <strong class="trades-today-count">{{ system_status.trades_today }}</strong> Today
+                                </span>
+                                <span class="me-3 small">
+                                    <i class="fas fa-layer-group me-1"></i>
+                                    <strong>{{ system_status.position_size }}</strong> Contracts
+                                </span>
+                            </div>
+                        </div>
+                        
+                        <!-- Right: Status Only -->
+                        <div class="d-flex align-items-center">
+                            <small class="text-muted me-3">
+                                <i class="fas fa-robot me-1"></i>
+                                {{ 'Auto Running' if system_status.scheduler_running else 'Auto Stopped' }}
+                            </small>
+                            {% if system_status.connected %}
+                                <span class="badge bg-success">Connected</span>
+                            {% else %}
+                                <span class="badge bg-danger">Disconnected</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Manual Control Reminders -->
+    {% set manual_trades = trades|selectattr("status", "equalto", "MANUAL_CONTROL")|list %}
+    {% if manual_trades %}
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="alert alert-warning d-flex align-items-center" role="alert">
+                    <i class="fas fa-exclamation-triangle fa-2x me-3"></i>
+                    <div class="flex-grow-1">
+                        <h5 class="mb-2">⚠️ Manual Control Reminder</h5>
+                        <p class="mb-2">You have <strong>{{ manual_trades|length }} trade{{ 's' if manual_trades|length != 1 else '' }}</strong> under manual control that need closing data entered:</p>
+                        <ul class="mb-3">
+                            {% for trade in manual_trades %}
+                                <li><strong>{{ trade.trade_id }}</strong> - {{ trade.days_since_entry }} days old</li>
+                            {% endfor %}
+                        </ul>
+                        <a href="{{ url_for('positions') }}" class="btn btn-warning btn-sm">
+                            <i class="fas fa-edit me-1"></i>Record Closing Data Now
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% endif %}
+
+    <!-- GTC Orders Status & Debug -->
+    {% if active_trades %}
+        {% set missing_gtc_trades = active_trades|selectattr("status", "equalto", "ACTIVE")|selectattr("profit_target_order_id", "equalto", 0)|list %}
+        {% if missing_gtc_trades %}
+            <div class="row mb-4">
+                <div class="col-12">
+                    <div class="alert alert-info d-flex align-items-center" role="alert">
+                        <i class="fas fa-bullseye fa-2x me-3"></i>
+                        <div class="flex-grow-1">
+                            <h5 class="mb-2">🎯 Missing Profit Target Orders</h5>
+                            <p class="mb-2">Found <strong>{{ missing_gtc_trades|length }} active trade{{ 's' if missing_gtc_trades|length != 1 else '' }}</strong> without GTC profit target orders:</p>
+                            <ul class="mb-3">
+                                {% for trade in missing_gtc_trades %}
+                                    <li><strong>{{ trade.trade_id }}</strong> - Entry: ${{ "{:.2f}".format(trade.entry_credit) }} → Target: ${{ "{:.1f}".format((trade.entry_credit * 1.5 * 10)|int / 10.0) }}</li>
+                                {% endfor %}
+                            </ul>
+                            <div class="d-flex gap-2">
+                                <a href="{{ url_for('place_missing_gtc_orders') }}" class="btn btn-primary btn-sm" 
+                                   onclick="return confirm('Place GTC profit target orders for {{ missing_gtc_trades|length }} trade{{ 's' if missing_gtc_trades|length != 1 else '' }}?');">
+                                    <i class="fas fa-plus me-1"></i>Place Missing GTC Orders
+                                </a>
+                                <a href="{{ url_for('debug_gtc_orders') }}" class="btn btn-outline-info btn-sm">
+                                    <i class="fas fa-search me-1"></i>Debug GTC Orders
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        {% endif %}
+    {% endif %}
+
+    <!-- Active Positions -->
+    <div class="row">
+        <div class="col-lg-8">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center py-2">
+                    <div class="d-flex align-items-center">
+                        <small class="text-muted me-4">Real-time updates</small>
+                        <span class="badge bg-info me-3">SPX: <span class="spx-price">{{ system_status.spx_price or 'Loading...' }}</span></span>
+                        {% if total_pnl != 0 %}
+                            <span class="badge total-pnl-badge {{ 'bg-success' if total_pnl > 0 else 'bg-danger' }} ms-2">
+                                Total P&L: ${{ "{:,.0f}".format(total_pnl) }}
+                            </span>
+                        {% else %}
+                            <span class="badge total-pnl-badge ms-2" style="display: none;"></span>
+                        {% endif %}
+                    </div>
+                    <div class="d-flex gap-2">
+                        <a href="{{ url_for('positions') }}" class="btn btn-outline-primary btn-sm">
+                            <i class="fas fa-list me-1"></i>Positions
+                        </a>
+                        <a href="{{ url_for('trade_history') }}" class="btn btn-outline-secondary btn-sm">
+                            <i class="fas fa-history me-1"></i>History
+                        </a>
+                        <a href="{{ url_for('import_trade') }}" class="btn btn-outline-warning btn-sm">
+                            <i class="fas fa-file-import me-1"></i>Import Manual Trade
+                        </a>
+                    </div>
+                </div>
+                <div class="card-body">
+                    {% if active_trades %}
+                        {% for trade in active_trades[:7] %}
+                            {% set pnl_total = trade.pnl_total if trade.pnl_total else 0 %}
+                            {% set pnl_per_contract = trade.pnl_per_contract if trade.pnl_per_contract else 0 %}
+                            {% set has_pnl = trade.unrealized_pnl and trade.unrealized_pnl != 0 %}
+                            
+                            <div class="card mb-2 {{ 'border-success border-2' if trade.unrealized_pnl > 0 else 'border-danger border-2' if trade.unrealized_pnl < 0 else 'border-secondary' }}" data-trade-id="{{ trade.trade_id }}">
+                                <div class="card-body p-2">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <!-- Left: Trade Info -->
+                                        <div class="flex-shrink-0" style="min-width: 160px;">
+                                            <div class="fw-bold text-primary">{{ trade.trade_id }}</div>
+                                            <div class="text-muted small">{{ trade.put_strike|int }}P/{{ trade.call_strike|int }}C • {{ trade.short_expiry_display }}/{{ trade.long_expiry_display }}</div>
+                                        </div>
+                                        
+                                        <!-- Center: Pricing -->
+                                        <div class="flex-grow-1 mx-3">
+                                            <div class="d-flex justify-content-around text-center">
+                                                <div>
+                                                    <div class="text-muted small">Entry</div>
+                                                    <div class="fw-bold">${{ "%.2f"|format(trade.entry_credit) }}</div>
+                                                </div>
+                                                <div>
+                                                    <div class="text-muted small">Current</div>
+                                                    <div class="current-price text-info fw-bold">${{ "%.2f"|format(trade.current_spread_price) }}</div>
+                                                </div>
+                                                <div>
+                                                    <div class="text-muted small">Exit</div>
+                                                    <div class="text-muted">PT ${{ "%.0f"|format(trade.profit_target) }} or {{ trade.exit_date_display }}</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        
+                                        <!-- Right: P&L -->
+                                        <div class="flex-shrink-0 text-end" style="min-width: 140px;">
+                                            {% if has_pnl %}
+                                                <div class="fw-bold h5 mb-0 pnl-total {{ 'text-success' if trade.unrealized_pnl > 0 else 'text-danger' }}">
+                                                    ${{ "{:,.0f}".format(pnl_total) }}
+                                                </div>
+                                                <span class="badge {{ 'bg-success' if trade.unrealized_pnl > 0 else 'bg-danger' }} pnl-percent">
+                                                    {{ "%.1f"|format((trade.unrealized_pnl / abs(trade.entry_credit)) * 100) }}%
+                                                </span>
+                                            {% else %}
+                                                <div class="fw-bold h5 mb-0 text-muted pnl-total">${{ "{:,.0f}".format(pnl_total) }}</div>
+                                                <span class="badge bg-secondary pnl-percent">0.0%</span>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        {% endfor %}
+                        
+                        {% if active_trades|length > 7 %}
+                            <div class="text-center">
+                                <a href="{{ url_for('positions') }}" class="btn btn-outline-primary">
+                                    View {{ active_trades|length - 7 }} More Positions
+                                </a>
+                            </div>
+                        {% endif %}
+                    {% else %}
+                        <div class="text-center text-muted py-4">
+                            <i class="fas fa-inbox fa-3x mb-3"></i>
+                            <h5>No Active Positions</h5>
+                            <p>The system will automatically create positions at 9:45 AM on trading days.</p>
+                            <a href="{{ url_for('manual_trade') }}" class="btn btn-primary">Execute Manual Trade</a>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- System Info & Recent Activity -->
+        <div class="col-lg-4">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0"><i class="fas fa-clock me-2"></i>Recent Activity</h5>
+                    <a href="{{ url_for('view_logs') }}" class="btn btn-outline-secondary btn-sm">View All</a>
+                </div>
+                <div class="card-body">
+                    {% if recent_logs %}
+                        {% for log in recent_logs[:8] %}
+                            <div class="d-flex align-items-start mb-2">
+                                <i class="fas fa-{{ 'check-circle text-success' if log[2] else 'times-circle text-danger' }} me-2 mt-1"></i>
+                                <div class="flex-grow-1">
+                                    <small class="text-muted">{{ log[3] }}</small>
+                                    <div class="small">{{ log[1] }}</div>
+                                </div>
+                            </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="text-center text-muted">
+                            <i class="fas fa-history fa-2x mb-2"></i>
+                            <p>No recent activity</p>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Auto-refresh system status and SPX price every 30 seconds
+function updateSystemStatus() {
+    fetch('/api/status')
+        .then(response => response.json())
+        .then(data => {
+            // Update SPX price (without $ sign)
+            const spxPriceElement = document.querySelector('.spx-price');
+            if (spxPriceElement && data.spx_price) {
+                spxPriceElement.textContent = data.spx_price.toFixed(2);
+            }
+            
+            // Update connection status
+            const connectionBanner = document.querySelector('.connection-banner');
+            const connectionStatus = document.querySelector('.connection-status');
+            const schedulerStatus = document.querySelector('.scheduler-status');
+            
+            if (connectionBanner) {
+                connectionBanner.className = data.connected ? 
+                    'card bg-success text-white connection-banner' : 
+                    'card bg-danger text-white connection-banner';
+            }
+            
+            if (connectionStatus) {
+                connectionStatus.innerHTML = data.connected ? 
+                    '<i class="fas fa-circle text-success me-2"></i><span class="fw-bold">IBKR Connected</span>' :
+                    '<i class="fas fa-circle text-danger me-2"></i><span class="fw-bold">IBKR Disconnected</span>';
+            }
+            
+            if (schedulerStatus) {
+                schedulerStatus.innerHTML = '<i class="fas fa-robot me-1"></i><small>Scheduler: ' + 
+                    (data.scheduler_running ? 'Running' : 'Stopped') + '</small>';
+            }
+            
+            // Update active positions count
+            const activePositionsElement = document.querySelector('.active-positions-count');
+            if (activePositionsElement) {
+                activePositionsElement.textContent = data.active_positions;
+            }
+            
+            // Update trades today count
+            const tradesTodayElement = document.querySelector('.trades-today-count');
+            if (tradesTodayElement) {
+                tradesTodayElement.textContent = data.trades_today;
+            }
+        })
+        .catch(error => {
+            console.log('Status update failed:', error);
+        });
+}
+
+// Update immediately and then every 30 seconds
+updateSystemStatus();
+setInterval(updateSystemStatus, 30000);
+
+// Auto-refresh P&L data (always-on with streaming data)
+let autoRefreshInterval = null;
+
+function updatePnLDisplay() {
+    
+    fetch('/get_pnl_data')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                // Update each position's P&L display
+                data.pnl_data.forEach(trade => {
+                    const tradeCard = document.querySelector(`[data-trade-id="${trade.trade_id}"]`);
+                    if (tradeCard) {
+                        // Update P&L total
+                        const pnlTotalElement = tradeCard.querySelector('.pnl-total');
+                        if (pnlTotalElement) {
+                            pnlTotalElement.textContent = `$${trade.pnl_total.toLocaleString('en-US', {maximumFractionDigits: 0})}`;
+                            pnlTotalElement.className = `pnl-total ${trade.unrealized_pnl > 0 ? 'profit-positive' : 'profit-negative'}`;
+                        }
+                        
+                        // Update P&L per contract
+                        const pnlPerContractElement = tradeCard.querySelector('.pnl-per-contract');
+                        if (pnlPerContractElement) {
+                            pnlPerContractElement.textContent = `$${trade.pnl_per_contract.toLocaleString('en-US', {maximumFractionDigits: 0})} per contract`;
+                        }
+                        
+                        // Update percentage
+                        const pnlPercentElement = tradeCard.querySelector('.pnl-percent');
+                        if (pnlPercentElement) {
+                            pnlPercentElement.textContent = `${trade.pnl_percentage.toFixed(1)}%`;
+                            pnlPercentElement.className = `pnl-percent ${trade.unrealized_pnl > 0 ? 'text-success' : 'text-danger'}`;
+                        }
+                        
+                        // Update current price
+                        const currentPriceElement = tradeCard.querySelector('.current-price');
+                        if (currentPriceElement && trade.current_spread_price > 0) {
+                            currentPriceElement.textContent = `$${trade.current_spread_price.toFixed(2)}`;
+                        }
+                    }
+                });
+                
+                // Update last refresh time and streaming status
+                const refreshTimeElement = document.querySelector('.pnl-refresh-time');
+                if (refreshTimeElement) {
+                    const streamingText = data.streaming_active ? ' (LIVE)' : ' (DB)';
+                    refreshTimeElement.textContent = `Last updated: ${data.timestamp}${streamingText}`;
+                }
+                
+                // Calculate and update total P&L in real-time
+                let totalPnl = 0;
+                data.pnl_data.forEach(trade => {
+                    if (trade.pnl_total) {
+                        totalPnl += trade.pnl_total;
+                    }
+                });
+                
+                // Update total P&L badge
+                const totalPnlBadge = document.querySelector('.total-pnl-badge');
+                if (totalPnlBadge && Math.abs(totalPnl) > 0) {
+                    totalPnlBadge.textContent = `Total P&L: $${totalPnl.toLocaleString('en-US', {maximumFractionDigits: 0})}`;
+                    totalPnlBadge.className = `badge total-pnl-badge ms-2 ${totalPnl > 0 ? 'bg-success' : 'bg-danger'}`;
+                    totalPnlBadge.style.display = 'inline';
+                } else if (totalPnlBadge) {
+                    totalPnlBadge.style.display = 'none';
+                }
+                
+                // Update SPX price if available (without $ sign)
+                if (data.spx_price && data.spx_price > 0) {
+                    const spxPriceElements = document.querySelectorAll('.spx-price');
+                    spxPriceElements.forEach(element => {
+                        element.textContent = data.spx_price.toFixed(2);
+                    });
+                }
+            }
+        })
+        .catch(error => {
+            console.log('P&L refresh failed:', error);
+        });
+}
+
+// Start auto-refresh immediately and always keep it running
+function startAutoRefresh() {
+    // Start auto-refresh every 5 seconds for real-time streaming data
+    autoRefreshInterval = setInterval(updatePnLDisplay, 5000);
+    updatePnLDisplay(); // Update immediately
+}
+
+// Start auto-refresh when page loads
+startAutoRefresh();
+</script>
+{% endblock %}

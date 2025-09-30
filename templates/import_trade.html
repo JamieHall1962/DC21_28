@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block title %}Import Manual Trade - SPX Calendar System{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-header">
+                    <h4 class="mb-0"><i class="fas fa-file-import me-2"></i>Import Manual Trade</h4>
+                </div>
+                <div class="card-body">
+                    <div class="alert alert-info" role="alert">
+                        <i class="fas fa-info-circle me-2"></i>
+                        <strong>Import a trade you executed manually through TWS.</strong> 
+                        The system will take over management, including streaming P&L and GTC profit targets.
+                    </div>
+
+                    <form method="POST">
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <label for="entry_date" class="form-label">Entry Date</label>
+                                <input type="date" class="form-control" id="entry_date" name="entry_date" required>
+                            </div>
+                            <div class="col-md-6">
+                                <label for="entry_time" class="form-label">Entry Time</label>
+                                <input type="time" class="form-control" id="entry_time" name="entry_time" value="09:45" required>
+                            </div>
+                        </div>
+
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <label for="put_strike" class="form-label">Put Strike</label>
+                                <div class="input-group">
+                                    <input type="number" class="form-control" id="put_strike" name="put_strike" 
+                                           step="0.01" placeholder="e.g. 6410" required>
+                                    <span class="input-group-text">P</span>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <label for="call_strike" class="form-label">Call Strike</label>
+                                <div class="input-group">
+                                    <input type="number" class="form-control" id="call_strike" name="call_strike" 
+                                           step="0.01" placeholder="e.g. 6750" required>
+                                    <span class="input-group-text">C</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <label for="short_expiry" class="form-label">Short Expiry (21-day)</label>
+                                <input type="text" class="form-control" id="short_expiry" name="short_expiry" 
+                                       placeholder="MM/DD/YYYY (e.g. 09/27/2025)" pattern="\d{2}/\d{2}/\d{4}" required>
+                                <small class="form-text text-muted">Format: MM/DD/YYYY</small>
+                            </div>
+                            <div class="col-md-6">
+                                <label for="long_expiry" class="form-label">Long Expiry (28-day)</label>
+                                <input type="text" class="form-control" id="long_expiry" name="long_expiry" 
+                                       placeholder="MM/DD/YYYY (e.g. 10/04/2025)" pattern="\d{2}/\d{2}/\d{4}" required>
+                                <small class="form-text text-muted">Format: MM/DD/YYYY</small>
+                            </div>
+                        </div>
+
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <label for="entry_price" class="form-label">Entry Price (Debit)</label>
+                                <div class="input-group">
+                                    <span class="input-group-text">$</span>
+                                    <input type="number" class="form-control" id="entry_price" name="entry_price" 
+                                           step="0.01" placeholder="e.g. 18.50" required>
+                                </div>
+                                <small class="form-text text-muted">Amount you paid for the spread</small>
+                            </div>
+                            <div class="col-md-6">
+                                <label for="spx_price" class="form-label">SPX Price at Entry (Optional)</label>
+                                <div class="input-group">
+                                    <span class="input-group-text">$</span>
+                                    <input type="number" class="form-control" id="spx_price" name="spx_price" 
+                                           step="0.01" placeholder="e.g. 6614.05">
+                                </div>
+                                <small class="form-text text-muted">Leave blank to use current SPX price</small>
+                            </div>
+                        </div>
+
+                        <div class="alert alert-warning" role="alert">
+                            <i class="fas fa-exclamation-triangle me-2"></i>
+                            <strong>Double-check your data!</strong> Once imported, the system will:
+                            <ul class="mb-0 mt-2">
+                                <li>Start live P&L tracking ✅</li>
+                                <li>Monitor for exit conditions ✅</li>
+                                <li>Send SMS notifications ✅</li>
+                                <li>Try to place GTC order (may fail for imported trades) ⚠️</li>
+                            </ul>
+                        </div>
+                        
+                        <div class="alert alert-info" role="alert">
+                            <i class="fas fa-info-circle me-2"></i>
+                            <strong>Note:</strong> GTC profit target orders often don't work for imported trades since IBKR needs the original contract IDs. 
+                            The system will still monitor your position and alert you when it's time to close manually.
+                        </div>
+
+                        <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+                            <a href="{{ url_for('dashboard') }}" class="btn btn-secondary me-md-2">Cancel</a>
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-file-import me-2"></i>Import Trade
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Auto-fill today's date
+document.addEventListener('DOMContentLoaded', function() {
+    const today = new Date().toISOString().split('T')[0];
+    document.getElementById('entry_date').value = today;
+});
+</script>
+{% endblock %}

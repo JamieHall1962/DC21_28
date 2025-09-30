@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+
+{% block title %}System Logs - SPX Calendar Trading{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4">
+    <div class="row">
+        <div class="col-12">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <div>
+                    <h1><i class="fas fa-file-alt me-2"></i>System Logs</h1>
+                    <p class="text-muted">Monitor system activity and troubleshoot issues</p>
+                </div>
+                <button onclick="location.reload()" class="btn btn-outline-primary">
+                    <i class="fas fa-sync-alt me-1"></i>Refresh
+                </button>
+            </div>
+        </div>
+    </div>
+
+    {% if logs %}
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-sm mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th width="5%">Status</th>
+                                        <th width="15%">Timestamp</th>
+                                        <th width="15%">Action</th>
+                                        <th>Message</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for log in logs %}
+                                        <tr class="{{ 'table-success' if log[2] else 'table-danger' if not log[2] else '' }}">
+                                            <td class="text-center">
+                                                <i class="fas fa-{{ 'check-circle text-success' if log[2] else 'times-circle text-danger' }}"></i>
+                                            </td>
+                                            <td>
+                                                <small class="font-monospace">{{ log[3] }}</small>
+                                            </td>
+                                            <td>
+                                                <span class="badge bg-{{ 
+                                                    'success' if 'SUCCESS' in log[0] or 'FILLED' in log[0] else
+                                                    'danger' if 'ERROR' in log[0] or 'FAILED' in log[0] else
+                                                    'warning' if 'SKIP' in log[0] or 'CANCEL' in log[0] else
+                                                    'info' if 'START' in log[0] or 'CONNECT' in log[0] else
+                                                    'secondary'
+                                                }}">
+                                                    {{ log[0] }}
+                                                </span>
+                                            </td>
+                                            <td>
+                                                <span class="font-monospace small">{{ log[1] }}</span>
+                                            </td>
+                                        </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Log Statistics -->
+        <div class="row mt-4">
+            <div class="col-md-3">
+                <div class="card bg-light">
+                    <div class="card-body text-center">
+                        <h4>{{ logs|length }}</h4>
+                        <small class="text-muted">Total Entries</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-success text-white">
+                    <div class="card-body text-center">
+                        {% set success_logs = logs|selectattr('2', 'equalto', True)|list %}
+                        <h4>{{ success_logs|length }}</h4>
+                        <small>Successful Actions</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-danger text-white">
+                    <div class="card-body text-center">
+                        {% set error_logs = logs|selectattr('2', 'equalto', False)|list %}
+                        <h4>{{ error_logs|length }}</h4>
+                        <small>Errors/Failures</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-info text-white">
+                    <div class="card-body text-center">
+                        {% if logs %}
+                            {% set latest_log = logs[0] %}
+                            <h6 class="small">{{ latest_log[3] }}</h6>
+                        {% else %}
+                            <h6>-</h6>
+                        {% endif %}
+                        <small>Latest Activity</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% else %}
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-body text-center py-5">
+                        <i class="fas fa-file-alt fa-4x text-muted mb-3"></i>
+                        <h3>No System Logs</h3>
+                        <p class="text-muted mb-4">
+                            System logs will appear here as the trading system operates.<br>
+                            Logs include trade attempts, connection status, and error messages.
+                        </p>
+                        <button onclick="location.reload()" class="btn btn-outline-primary">
+                            <i class="fas fa-sync-alt me-1"></i>Refresh Logs
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Auto-refresh logs every 30 seconds
+    setTimeout(function() {
+        location.reload();
+    }, 30000);
+</script>
+{% endblock %}
