@@ -26,6 +26,8 @@ config = None
 scheduler_thread = None
 scheduler_running = False
 last_reconnect_attempt = 0
+position_monitor_thread = None
+position_monitor_running = False
 
 def init_trader():
     """Initialize the trading system with IBKR connection"""
@@ -53,6 +55,43 @@ def init_trader():
             print(f"⚠️ Streaming failed: {e}")
     else:
         print("❌ Web interface failed to connect to IBKR")
+
+def monitor_new_positions():
+    """Background thread to monitor for new positions and start streaming for them"""
+    global position_monitor_running
+    
+    print("🔍 Position monitor thread started - will check for new positions every 30 seconds")
+    
+    while position_monitor_running:
+        try:
+            if trader and trader.is_connected:
+                # Get all active trades from database
+                active_trades = trader.db.get_active_trades()
+                
+                # Check if any trades are NOT in the streaming positions dict
+                for trade in active_trades:
+                    if trade.status == "ACTIVE" and trade.trade_id not in trader.streaming_positions:
+                        print(f"🆕 NEW POSITION DETECTED: {trade.trade_id} - Starting streaming...")
+                        try:
+                            trader.start_position_streaming(trade)
+                            print(f"✅ Streaming started for {trade.trade_id}")
+                        except Exception as e:
+                            print(f"⚠️ Failed to start streaming for {trade.trade_id}: {e}")
+        except Exception as e:
+            print(f"⚠️ Error in position monitor: {e}")
+        
+        # Check every 30 seconds
+        time.sleep(30)
+
+def start_position_monitor():
+    """Start the background position monitoring thread"""
+    global position_monitor_thread, position_monitor_running
+    
+    if not position_monitor_running:
+        position_monitor_running = True
+        position_monitor_thread = threading.Thread(target=monitor_new_positions, daemon=True)
+        position_monitor_thread.start()
+        print("✅ Position monitor started")
 
 # Web interface maintains its own IBKR connection for live pricing and immediate exits
 # Uses Client ID 10 to avoid conflicts with main system (Client ID 2)
@@ -571,17 +610,44 @@ def place_missing_gtc_orders():
         result = trader.place_missing_gtc_orders()
         if result['success']:
             flash(f"✅ {result['message']}", 'success')
-            # Log the action
-            trader.db.log_daily_action(
-                'PLACE_MISSING_GTC',
-                f"Placed {result['placed']} missing GTC orders via web interface",
-                True
-            )
+            # Log the action if any orders were placed
+            if result.get('placed', 0) > 0:
+                trader.db.log_daily_action(
+                    'PLACE_MISSING_GTC',
+                    f"Placed {result['placed']} missing GTC orders via web interface",
+                    True
+                )
         else:
             flash(f"❌ {result['message']}", 'error')
             
     except Exception as e:
         flash(f'Error placing missing GTC orders: {e}', 'error')
+    
+    return redirect(url_for('dashboard'))
+
+@app.route('/sync_gtc_order_ids')
+def sync_gtc_order_ids():
+    """Sync GTC order IDs with IBKR permanent order IDs"""
+    if not trader:
+        init_trader()
+        flash('Trader not initialized', 'error')
+        return redirect(url_for('dashboard'))
+    
+    try:
+        # Ensure IBKR connection
+        if not connect_to_ibkr():
+            flash('❌ Cannot sync order IDs - not connected to IBKR', 'error')
+            return redirect(url_for('dashboard'))
+        
+        # Sync order IDs with IBKR
+        success = trader.sync_gtc_order_ids_with_ibkr()
+        if success:
+            flash('✅ GTC order IDs synced with IBKR permanent order IDs. Refresh to see updated IDs.', 'success')
+        else:
+            flash('❌ Failed to sync order IDs. Check logs for details.', 'error')
+            
+    except Exception as e:
+        flash(f'Error syncing order IDs: {e}', 'error')
     
     return redirect(url_for('dashboard'))
 
@@ -1197,8 +1263,14 @@ if __name__ == '__main__':
     # Initialize read-only database access
     init_trader()
     
+    # Start position monitoring thread to detect new positions
+    start_position_monitor()
+    
     try:
         app.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False)
     except KeyboardInterrupt:
         print("\nShutting down web interface...")
+        position_monitor_running = False
+        if position_monitor_thread:
+            position_monitor_thread.join(timeout=2)
         print("System shutdown complete")

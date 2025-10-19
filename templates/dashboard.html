@@ -80,27 +80,40 @@
 
     <!-- GTC Orders Status & Debug -->
     {% if active_trades %}
-        {% set missing_gtc_trades = active_trades|selectattr("status", "equalto", "ACTIVE")|selectattr("profit_target_order_id", "equalto", 0)|list %}
+        {% set missing_gtc_trades = [] %}
+        {% for trade in active_trades %}
+            {% if trade.status == "ACTIVE" %}
+                {% if trade.profit_target_order_id == 0 or trade.profit_target_order_id < 1000 or trade.profit_target_status in ["NONE", "CANCEL_FAILED"] %}
+                    {% set _ = missing_gtc_trades.append(trade) %}
+                {% endif %}
+            {% endif %}
+        {% endfor %}
         {% if missing_gtc_trades %}
             <div class="row mb-4">
                 <div class="col-12">
                     <div class="alert alert-info d-flex align-items-center" role="alert">
                         <i class="fas fa-bullseye fa-2x me-3"></i>
                         <div class="flex-grow-1">
-                            <h5 class="mb-2">🎯 Missing Profit Target Orders</h5>
-                            <p class="mb-2">Found <strong>{{ missing_gtc_trades|length }} active trade{{ 's' if missing_gtc_trades|length != 1 else '' }}</strong> without GTC profit target orders:</p>
+                            <h5 class="mb-2">⚠️ Missing or Invalid Profit Target Orders</h5>
+                            <p class="mb-2">Found <strong>{{ missing_gtc_trades|length }} active trade{{ 's' if missing_gtc_trades|length != 1 else '' }}</strong> with missing or invalid GTC profit target orders:</p>
                             <ul class="mb-3">
                                 {% for trade in missing_gtc_trades %}
-                                    <li><strong>{{ trade.trade_id }}</strong> - Entry: ${{ "{:.2f}".format(trade.entry_credit) }} → Target: ${{ "{:.1f}".format((trade.entry_credit * 1.5 * 10)|int / 10.0) }}</li>
+                                    <li>
+                                        <strong>{{ trade.trade_id }}</strong> - Entry: ${{ "{:.2f}".format(trade.entry_credit) }} → Target: ${{ "{:.1f}".format((trade.entry_credit * 1.5 * 10)|int / 10.0) }}
+                                        {% if trade.profit_target_order_id == 0 %}
+                                            <span class="badge bg-danger">No Order ID</span>
+                                        {% elif trade.profit_target_order_id < 1000 %}
+                                            <span class="badge bg-warning text-dark">Invalid ID: {{ trade.profit_target_order_id }}</span>
+                                        {% elif trade.profit_target_status in ["NONE", "CANCEL_FAILED"] %}
+                                            <span class="badge bg-secondary">{{ trade.profit_target_status }}</span>
+                                        {% endif %}
+                                    </li>
                                 {% endfor %}
                             </ul>
                             <div class="d-flex gap-2">
                                 <a href="{{ url_for('place_missing_gtc_orders') }}" class="btn btn-primary btn-sm" 
                                    onclick="return confirm('Place GTC profit target orders for {{ missing_gtc_trades|length }} trade{{ 's' if missing_gtc_trades|length != 1 else '' }}?');">
                                     <i class="fas fa-plus me-1"></i>Place Missing GTC Orders
-                                </a>
-                                <a href="{{ url_for('debug_gtc_orders') }}" class="btn btn-outline-info btn-sm">
-                                    <i class="fas fa-search me-1"></i>Debug GTC Orders
                                 </a>
                             </div>
                         </div>
@@ -134,7 +147,7 @@
                             <i class="fas fa-history me-1"></i>History
                         </a>
                         <a href="{{ url_for('import_trade') }}" class="btn btn-outline-warning btn-sm">
-                            <i class="fas fa-file-import me-1"></i>Import Manual Trade
+                            <i class="fas fa-file-import me-1"></i>Import
                         </a>
                     </div>
                 </div>
@@ -145,45 +158,55 @@
                             {% set pnl_per_contract = trade.pnl_per_contract if trade.pnl_per_contract else 0 %}
                             {% set has_pnl = trade.unrealized_pnl and trade.unrealized_pnl != 0 %}
                             
-                            <div class="card mb-2 {{ 'border-success border-2' if trade.unrealized_pnl > 0 else 'border-danger border-2' if trade.unrealized_pnl < 0 else 'border-secondary' }}" data-trade-id="{{ trade.trade_id }}">
-                                <div class="card-body p-2">
-                                    <div class="d-flex justify-content-between align-items-center">
-                                        <!-- Left: Trade Info -->
-                                        <div class="flex-shrink-0" style="min-width: 160px;">
-                                            <div class="fw-bold text-primary">{{ trade.trade_id }}</div>
-                                            <div class="text-muted small">{{ trade.put_strike|int }}P/{{ trade.call_strike|int }}C • {{ trade.short_expiry_display }}/{{ trade.long_expiry_display }}</div>
+                            <div class="card mb-1 {{ 'border-success border-2' if trade.unrealized_pnl > 0 else 'border-danger border-2' if trade.unrealized_pnl < 0 else 'border-secondary' }}" data-trade-id="{{ trade.trade_id }}">
+                                <div class="card-body py-2 px-3">
+                                    <div class="row align-items-center">
+                                        <!-- Trade ID -->
+                                        <div class="col-1">
+                                            <div class="fw-bold text-primary small">{{ trade.trade_id.replace('CAL_', '').replace('_', ' ') }}</div>
                                         </div>
                                         
-                                        <!-- Center: Pricing -->
-                                        <div class="flex-grow-1 mx-3">
-                                            <div class="d-flex justify-content-around text-center">
-                                                <div>
-                                                    <div class="text-muted small">Entry</div>
-                                                    <div class="fw-bold">${{ "%.2f"|format(trade.entry_credit) }}</div>
-                                                </div>
-                                                <div>
-                                                    <div class="text-muted small">Current</div>
-                                                    <div class="current-price text-info fw-bold">${{ "%.2f"|format(trade.current_spread_price) }}</div>
-                                                </div>
-                                                <div>
-                                                    <div class="text-muted small">Exit</div>
-                                                    <div class="text-muted">PT ${{ "%.0f"|format(trade.profit_target) }} or {{ trade.exit_date_display }}</div>
-                                                </div>
-                                            </div>
+                                        <!-- Strikes & Expiry -->
+                                        <div class="col-2">
+                                            <div class="small">{{ trade.put_strike|int }}P / {{ trade.call_strike|int }}C</div>
+                                            <div class="text-muted" style="font-size: 0.8rem;">{{ trade.short_expiry_display }} / {{ trade.long_expiry_display }}</div>
                                         </div>
                                         
-                                        <!-- Right: P&L -->
-                                        <div class="flex-shrink-0 text-end" style="min-width: 140px;">
-                                            {% if has_pnl %}
-                                                <div class="fw-bold h5 mb-0 pnl-total {{ 'text-success' if trade.unrealized_pnl > 0 else 'text-danger' }}">
-                                                    ${{ "{:,.0f}".format(pnl_total) }}
-                                                </div>
-                                                <span class="badge {{ 'bg-success' if trade.unrealized_pnl > 0 else 'bg-danger' }} pnl-percent">
-                                                    {{ "%.1f"|format((trade.unrealized_pnl / abs(trade.entry_credit)) * 100) }}%
-                                                </span>
+                                        <!-- Entry Price -->
+                                        <div class="col-1 text-center">
+                                            <div class="text-muted" style="font-size: 0.75rem;">Entry</div>
+                                            <div class="fw-bold small">${{ "%.2f"|format(trade.entry_credit) }}</div>
+                                        </div>
+                                        
+                                        <!-- Current Price -->
+                                        <div class="col-1 text-center">
+                                            <div class="text-muted" style="font-size: 0.75rem;">Current</div>
+                                            <div class="current-price text-info fw-bold small">${{ "%.2f"|format(trade.current_spread_price) }}</div>
+                                        </div>
+                                        
+                                        <!-- Target Price / Exit -->
+                                        <div class="col-2 text-center">
+                                            <div class="text-muted" style="font-size: 0.75rem;">Target</div>
+                                            <div class="fw-bold small">${{ "%.1f"|format(trade.profit_target) }}{% if trade.profit_target_status != "FILLED" %} <span class="text-muted">or {{ trade.exit_date_display }}</span>{% endif %}</div>
+                                        </div>
+                                        
+                                        <!-- GTC Order -->
+                                        <div class="col-2 text-center">
+                                            {% if trade.profit_target_order_id and trade.profit_target_order_id > 0 %}
+                                                <span class="badge bg-info" style="font-size: 0.75rem;" title="GTC Profit Target Order">🎯 {{ trade.profit_target_order_id }}</span>
                                             {% else %}
-                                                <div class="fw-bold h5 mb-0 text-muted pnl-total">${{ "{:,.0f}".format(pnl_total) }}</div>
-                                                <span class="badge bg-secondary pnl-percent">0.0%</span>
+                                                <span class="text-muted" style="font-size: 0.8rem;">No GTC</span>
+                                            {% endif %}
+                                        </div>
+                                        
+                                        <!-- P&L -->
+                                        <div class="col-3 text-end">
+                                            {% if has_pnl %}
+                                                <div class="fw-bold h6 mb-0 pnl-total {{ 'text-success' if trade.unrealized_pnl > 0 else 'text-danger' }}">
+                                                    ${{ "{:,.0f}".format(pnl_total) }} <span class="badge {{ 'bg-success' if trade.unrealized_pnl > 0 else 'bg-danger' }} pnl-percent" style="font-size: 0.75rem;">{{ "%.1f"|format((trade.unrealized_pnl / abs(trade.entry_credit)) * 100) }}%</span>
+                                                </div>
+                                            {% else %}
+                                                <div class="fw-bold h6 mb-0 text-muted pnl-total">$0 <span class="badge bg-secondary pnl-percent" style="font-size: 0.75rem;">0%</span></div>
                                             {% endif %}
                                         </div>
                                     </div>

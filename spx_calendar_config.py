@@ -33,7 +33,15 @@ class CalendarConfigTemplate:
     INITIAL_PRICE_TYPE = "MID"  # start with mid price
     PRICE_INCREMENT = 0.05  # increase bid by this amount
     MAX_PRICE_ATTEMPTS = 5  # total attempts before giving up
-    FILL_WAIT_TIME = 60  # seconds between price adjustments
+    FILL_WAIT_TIME = 60  # DEPRECATED - use ENTRY_FILL_TIMEOUT and EXIT_FILL_TIMEOUT
+    
+    # Entry order timeouts (can be patient - not filling isn't catastrophic)
+    ENTRY_FILL_TIMEOUT = 15  # seconds to wait before adjusting entry price
+    ENTRY_MAX_ATTEMPTS = 5  # max attempts for entry orders
+    
+    # Exit order timeouts (MUST be aggressive - we HAVE to get out!)
+    EXIT_FILL_TIMEOUT = 8  # seconds to wait before adjusting exit price (aggressive!)
+    EXIT_MAX_ATTEMPTS = 8  # more attempts for exits - we MUST fill
     
     # ===============================================
     # EXIT MANAGEMENT

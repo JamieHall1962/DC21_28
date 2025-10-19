@@ -66,6 +66,7 @@
                                         <th>Entry Price</th>
                                         <th>Current Price</th>
                                         <th>Exit Target</th>
+                                        <th>GTC Order</th>
                                         <th>Strikes & Expiry</th>
                                         <th>Days</th>
                                         <th>P&L</th>
@@ -99,6 +100,23 @@
                                             <td>
                                                 <div><strong>{{ "%.1f"|format(trade.profit_target) }}</strong></div>
                                                 <div class="small text-muted">or {{ trade.exit_date_display }}</div>
+                                            </td>
+                                            <td>
+                                                {% if trade.profit_target_order_id and trade.profit_target_order_id > 0 %}
+                                                    <div class="small">
+                                                        <span class="badge bg-info text-white" title="IBKR Order ID">{{ trade.profit_target_order_id }}</span>
+                                                    </div>
+                                                    <div class="small text-muted">
+                                                        @ ${{ "%.2f"|format(trade.profit_target_price) if trade.profit_target_price else "0.00" }}
+                                                    </div>
+                                                    <div class="small">
+                                                        <span class="badge bg-{{ 'success' if trade.profit_target_status == 'SUBMITTED' else ('warning' if trade.profit_target_status == 'FILLED' else 'secondary') }}">
+                                                            {{ trade.profit_target_status }}
+                                                        </span>
+                                                    </div>
+                                                {% else %}
+                                                    <div class="small text-muted">No GTC</div>
+                                                {% endif %}
                                             </td>
                                             <td>
                                                 <div class="small">

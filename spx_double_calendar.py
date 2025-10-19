@@ -57,8 +57,16 @@ class CalendarConfig:
     initial_price_type: str = "MID"  # start with mid price
     price_increment: float = 0.05
     max_price_attempts: int = 5
-    fill_wait_time: int = 60  # seconds between price adjustments
+    fill_wait_time: int = 60  # DEPRECATED - kept for backwards compatibility
     max_spread_premium: float = 0.25  # Maximum additional premium above mid to pay
+    
+    # Entry Order Management (can be patient)
+    entry_fill_timeout: int = 15  # seconds to wait before adjusting entry price
+    entry_max_attempts: int = 5  # max attempts for entry orders
+    
+    # Exit Order Management (MUST be aggressive!)
+    exit_fill_timeout: int = 8  # seconds to wait before adjusting exit price
+    exit_max_attempts: int = 8  # more attempts for exits - we MUST fill
     
     # Exit Management
     profit_target_pct: float = 0.50  # 50% profit target
@@ -106,6 +114,12 @@ class CalendarConfig:
                 self.max_price_attempts = db.get_setting('max_price_attempts', self.max_price_attempts)
                 self.fill_wait_time = db.get_setting('fill_wait_time', self.fill_wait_time)
                 self.max_spread_premium = db.get_setting('max_spread_premium', self.max_spread_premium)
+                
+                # Entry and exit timeouts
+                self.entry_fill_timeout = db.get_setting('entry_fill_timeout', self.entry_fill_timeout)
+                self.entry_max_attempts = db.get_setting('entry_max_attempts', self.entry_max_attempts)
+                self.exit_fill_timeout = db.get_setting('exit_fill_timeout', self.exit_fill_timeout)
+                self.exit_max_attempts = db.get_setting('exit_max_attempts', self.exit_max_attempts)
                 
                 # Failed trade handling
                 self.failed_trade_action = db.get_setting('failed_trade_action', 'skip')
@@ -785,6 +799,8 @@ class CalendarWrapper(EWrapper):
         self.contract_details_received = threading.Event()
         self.market_data_received = threading.Event()
         self.order_status_received = threading.Event()
+        self.order_cancelled = threading.Event()  # NEW: Track order cancellations
+        self.cancelled_order_ids = set()  # NEW: Track which orders were successfully cancelled
     
     def nextValidId(self, orderId: int):
         """Receive next valid order ID"""
@@ -875,9 +891,10 @@ class CalendarWrapper(EWrapper):
             'filled': filled,
             'remaining': remaining,
             'avg_fill_price': avgFillPrice,
-            'last_fill_price': lastFillPrice
+            'last_fill_price': lastFillPrice,
+            'perm_id': permId  # IBKR's permanent order ID (what shows in TWS)
         }
-        print(f"📋 Order {orderId}: {status}, Filled: {filled}, Price: {avgFillPrice}")
+        print(f"📋 Order {orderId} (IBKR ID: {permId}): {status}, Filled: {filled}, Price: {avgFillPrice}")
         
         # Also write to debug file for closing orders
         if orderId > 1000:  # Closing orders use high IDs
@@ -887,6 +904,12 @@ class CalendarWrapper(EWrapper):
         # Check if this is a profit target order that got filled
         if status == "Filled" and hasattr(self, 'trader') and self.trader:
             self.trader.check_profit_target_fill(orderId, avgFillPrice)
+        
+        # NEW: Track order cancellations
+        if status in ["Cancelled", "ApiCancelled"]:
+            self.cancelled_order_ids.add(orderId)
+            self.order_cancelled.set()
+            print(f"✓ Order {orderId} successfully cancelled")
         
         self.order_status_received.set()
     
@@ -2177,35 +2200,53 @@ class SPXCalendarTrader:
                 trade.short_expiry, trade.long_expiry, spread_mid
             )
             
-            # Attempt to fill the order with price improvement logic
+            # Attempt to fill the order with price improvement logic using CANCEL/REPLACE
             # Start at mid price, then increase bid if not filled
             current_bid = spread_mid
             max_bid = spread_mid + self.config.max_spread_premium  # Cap maximum bid
             
-            self.logger.info(f"💰 Pricing strategy: Start ${current_bid:.2f}, Max ${max_bid:.2f} (premium cap: ${self.config.max_spread_premium:.2f})")
+            self.logger.info(f"💰 Entry pricing strategy: Start ${current_bid:.2f}, Max ${max_bid:.2f}")
+            self.logger.info(f"📊 Entry timeout: {self.config.entry_fill_timeout}s per attempt, max {self.config.entry_max_attempts} attempts")
             
-            for attempt in range(self.config.max_price_attempts):
+            # Get initial order ID (will reuse for cancel/replace)
+            if self.wrapper.next_order_id is None:
+                self.logger.error("No valid order ID available")
+                return False
+            
+            order_id = self.wrapper.next_order_id
+            self.wrapper.next_order_id += 1  # Increment for next trade
+            trade.combo_order_id = order_id
+            
+            combo_contract = self.create_combo_contract(contracts)
+            
+            for attempt in range(self.config.entry_max_attempts):
                 trade.fill_attempts = attempt + 1
                 
-                # Create combo order
-                if self.wrapper.next_order_id is None:
-                    self.logger.error("No valid order ID available")
-                    return False
-                
-                order_id = self.wrapper.next_order_id
-                self.wrapper.next_order_id += 1  # CRITICAL FIX: Increment for next attempt
-                
+                # Create combo order with current price
                 combo_order = self.create_combo_order(current_bid, self.config.position_size)
-                combo_contract = self.create_combo_contract(contracts)
                 
-                # Place the order
-                self.client.placeOrder(order_id, combo_contract, combo_order)
-                trade.combo_order_id = order_id
+                # First attempt: Place order. Subsequent attempts: Modify order (cancel/replace)
+                if attempt == 0:
+                    # Place the initial order
+                    self.client.placeOrder(order_id, combo_contract, combo_order)
+                    self.logger.info(f"📤 Entry order placed: ID {order_id}, Price ${current_bid:.2f}")
+                else:
+                    # Modify the existing order (cancel/replace)
+                    modify_success = self.cancel_replace_order(order_id, combo_contract, combo_order)
+                    if not modify_success:
+                        self.logger.warning(f"⚠ Failed to modify order, trying to cancel and place new...")
+                        # Fallback: cancel and place new order
+                        self.client.cancelOrder(order_id)
+                        time.sleep(1)
+                        order_id = self.wrapper.next_order_id
+                        self.wrapper.next_order_id += 1
+                        self.client.placeOrder(order_id, combo_contract, combo_order)
+                        trade.combo_order_id = order_id
+                    
+                    self.logger.info(f"📤 Entry order adjusted (attempt {attempt + 1}/{self.config.entry_max_attempts}): ID {order_id}, Price ${current_bid:.2f}")
                 
-                self.logger.info(f"📤 Entry order placed (attempt {attempt + 1}/{self.config.max_price_attempts}): ID {order_id}, Price ${current_bid:.2f}")
-                
-                # Wait for fill
-                fill_timeout = self.config.fill_wait_time
+                # Wait for fill with shorter timeout
+                fill_timeout = self.config.entry_fill_timeout
                 start_time = time.time()
                 
                 while time.time() - start_time < fill_timeout:
@@ -2249,12 +2290,10 @@ class SPXCalendarTrader:
                     
                     time.sleep(1)
                 
-                # Order not filled, cancel and try higher price
-                self.logger.info(f"⏰ Order {order_id} not filled after {fill_timeout}s - cancelling and trying next attempt")
-                self.client.cancelOrder(order_id)
-                time.sleep(1)  # Wait for cancellation
+                # Order not filled, will adjust price and modify order on next iteration
+                self.logger.info(f"⏰ Order {order_id} not filled after {fill_timeout}s")
                 
-                if attempt < self.config.max_price_attempts - 1:
+                if attempt < self.config.entry_max_attempts - 1:
                     next_bid = current_bid + self.config.price_increment
                     next_bid = round(next_bid * 20) / 20  # Round to 0.05 (SPX tick)
                     
@@ -2262,19 +2301,27 @@ class SPXCalendarTrader:
                     if next_bid <= max_bid:
                         current_bid = next_bid
                         trade.last_bid_price = current_bid
-                        self.logger.info(f"💰 Increasing bid to ${current_bid:.2f} for attempt {attempt + 2}")
+                        self.logger.info(f"💰 Will increase bid to ${current_bid:.2f} for attempt {attempt + 2}")
                     else:
                         self.logger.warning(f"[WARNING] Next bid ${next_bid:.2f} would exceed max ${max_bid:.2f} - stopping attempts")
+                        # Cancel the unfilled order before breaking
+                        self.client.cancelOrder(order_id)
+                        time.sleep(1)
                         break
+                else:
+                    # Last attempt failed - cancel the order
+                    self.logger.info(f"⏰ Last attempt failed - cancelling order {order_id}")
+                    self.client.cancelOrder(order_id)
+                    time.sleep(1)
             
             # All attempts failed
             trade.status = "CANCELLED"
             trade.fill_status = "UNFILLED"
-            message = f"❌ Entry order failed: Not filled after {self.config.max_price_attempts} attempts (${trade.last_bid_price:.2f} final bid)"
+            message = f"❌ Entry order failed: Not filled after {self.config.entry_max_attempts} attempts (${trade.last_bid_price:.2f} final bid)"
             self.logger.error(message)
             
             # Send SMS with simplified failure message
-            failure_sms = f"SPX Calendar FAILED: Not filled after {self.config.max_price_attempts} attempts. Final bid: ${trade.last_bid_price:.2f}"
+            failure_sms = f"SPX Calendar FAILED: Not filled after {self.config.entry_max_attempts} attempts. Final bid: ${trade.last_bid_price:.2f}"
             self.notifications.send_sms(failure_sms)
             return False
             
@@ -2364,6 +2411,8 @@ class SPXCalendarTrader:
             
             current_date = self.get_local_time().date()
             exit_count = 0
+            gtc_cancelled_count = 0
+            gtc_failed_count = 0
             
             for trade in active_trades:
                 if trade.status != "ACTIVE":
@@ -2376,23 +2425,52 @@ class SPXCalendarTrader:
                 # Check if this trade should exit today (14th day)
                 if days_since_entry >= self.config.exit_day:
                     self.logger.info(f"🕒 Time exit triggered for {trade.trade_id} (day {days_since_entry})")
+                    
+                    # Log GTC order status before attempting close
+                    if trade.profit_target_order_id > 0:
+                        self.logger.info(f"   GTC Profit Target Order ID: {trade.profit_target_order_id}, Status: {trade.profit_target_status}")
+                        if trade.profit_target_status == "FILLED":
+                            self.logger.info(f"   ✓ GTC order already filled - no cancellation needed")
+                        else:
+                            self.logger.info(f"   → Will attempt to cancel GTC order before closing position")
+                    else:
+                        self.logger.info(f"   No GTC profit target order to cancel")
+                    
                     success = self.close_calendar_position(trade, f"Time exit - day {days_since_entry}")
                     if success:
                         exit_count += 1
+                        
+                        # Check final GTC order status after close attempt
+                        trade_updated = self.db.get_trade_by_id(trade.trade_id)
+                        if trade_updated and trade_updated.profit_target_order_id > 0:
+                            if trade_updated.profit_target_status == "CANCELLED":
+                                gtc_cancelled_count += 1
+                                self.logger.info(f"   ✓ GTC order {trade_updated.profit_target_order_id} successfully cancelled")
+                            elif trade_updated.profit_target_status == "CANCEL_FAILED":
+                                gtc_failed_count += 1
+                                self.logger.error(f"   ✗ GTC order {trade_updated.profit_target_order_id} cancellation FAILED - may still be active!")
+                        
                         # Send notification
                         self.notifications.send_sms(
                             f"SPX Calendar: Time exit for {trade.trade_id} on day {days_since_entry}. "
                             f"Position closed at 3:00 PM as scheduled."
                         )
+                    else:
+                        # CLOSE FAILED - THIS IS CRITICAL
+                        self.logger.error(f"🛑 CRITICAL: Failed to close {trade.trade_id} during 3PM exit check!")
+                        self.logger.error(f"🛑 Position remains OPEN - manual intervention required")
+                        
+                        # DON'T send another SMS here - close_calendar_position already sent one with details
             
             if exit_count > 0:
-                self.logger.info(f"[OK] Daily exit check complete: {exit_count} positions closed")
-                # Log the daily action
-                self.db.log_daily_action(
-                    'TIME_EXIT_CHECK',
-                    f'Daily 3PM exit check: {exit_count} positions closed',
-                    True
-                )
+                log_message = f'Daily 3PM exit check: {exit_count} positions closed'
+                if gtc_cancelled_count > 0:
+                    log_message += f', {gtc_cancelled_count} GTC orders cancelled'
+                if gtc_failed_count > 0:
+                    log_message += f', {gtc_failed_count} GTC orders FAILED to cancel'
+                    
+                self.logger.info(f"[OK] {log_message}")
+                self.db.log_daily_action('TIME_EXIT_CHECK', log_message, gtc_failed_count == 0)
             else:
                 self.logger.info("[OK] Daily exit check complete: No positions needed closing")
             
@@ -2541,6 +2619,20 @@ class SPXCalendarTrader:
                             for orph in orphaned[:5]:  # Show first 5
                                 self.logger.warning(f"     - {orph}")
                         
+                        # Build detailed log message for database
+                        log_parts = []
+                        log_parts.append(f'{len(discrepancies)} position issues, {len(orphaned)} orphaned')
+                        
+                        # Add position issue details
+                        if discrepancies:
+                            log_parts.append(f"Position Issues: {'; '.join(discrepancies)}")
+                        
+                        # Add orphaned position details
+                        if orphaned:
+                            log_parts.append(f"Orphaned: {'; '.join(orphaned)}")
+                        
+                        detailed_log_message = ' | '.join(log_parts)
+                        
                         # Send SMS for significant discrepancies
                         if total_missing > 4 or total_orphaned > 4:
                             self.notifications.send_sms(
@@ -2548,14 +2640,49 @@ class SPXCalendarTrader:
                                 f"and {len(orphaned)} orphaned positions. Check logs for details."
                             )
                         
+                        # Log to database with full details
                         self.db.log_daily_action(
                             'RECONCILIATION',
-                            f'Discrepancies found: {len(discrepancies)} position issues, {len(orphaned)} orphaned',
+                            detailed_log_message,
                             False
                         )
                     else:
                         self.logger.info("[OK] Position reconciliation: All positions match")
-                        self.db.log_daily_action('RECONCILIATION', 'All positions reconciled successfully', True)
+                    
+                    # Also check for missing GTC profit target orders
+                    self.logger.info("Checking for missing GTC profit target orders...")
+                    missing_gtc_count = 0
+                    missing_gtc_trades = []
+                    
+                    for trade in active_trades:
+                        if trade.status == "ACTIVE":
+                            if (trade.profit_target_order_id == 0 or 
+                                trade.profit_target_order_id < 1000 or 
+                                trade.profit_target_status in ["NONE", "CANCEL_FAILED"]):
+                                missing_gtc_count += 1
+                                missing_gtc_trades.append(f"{trade.trade_id} (Order:{trade.profit_target_order_id})")
+                                self.logger.warning(f"  ⚠️ Missing/invalid GTC order for {trade.trade_id}")
+                    
+                    if missing_gtc_count > 0:
+                        gtc_alert = f"{missing_gtc_count} trades missing GTC orders: {', '.join(missing_gtc_trades)}"
+                        self.logger.warning(f"[WARNING] {gtc_alert}")
+                        
+                        # Send SMS alert for missing GTC orders
+                        self.notifications.send_sms(
+                            f"SPX Calendar: {missing_gtc_count} active trade{'s' if missing_gtc_count != 1 else ''} missing GTC profit target orders. "
+                            f"Check dashboard to place orders."
+                        )
+                        
+                        # Log combined reconciliation result
+                        if discrepancies or orphaned:
+                            combined_msg = f"{detailed_log_message} | {gtc_alert}"
+                            self.db.log_daily_action('RECONCILIATION', combined_msg, False)
+                        else:
+                            self.db.log_daily_action('RECONCILIATION', f'Positions OK but {gtc_alert}', False)
+                    else:
+                        # All good - positions match and all GTC orders present
+                        if not (discrepancies or orphaned):
+                            self.db.log_daily_action('RECONCILIATION', 'All positions and GTC orders OK', True)
                 
                 else:
                     self.logger.error("[ERROR] IBKR position request timeout during reconciliation")
@@ -2607,11 +2734,18 @@ class SPXCalendarTrader:
                         if trade:
                             trade.status = "MANUAL_CONTROL"
                             self.db.save_trade(trade)
-                            # Cancel any GTC orders
-                            if trade.profit_target_order_id > 0 and trade.profit_target_status == "PLACED":
-                                self.client.cancelOrder(trade.profit_target_order_id)
-                                trade.profit_target_status = "CANCELLED"
-                                self.db.save_trade(trade)
+                            # Cancel any GTC orders with verification
+                            if trade.profit_target_order_id > 0 and trade.profit_target_status != "FILLED":
+                                self.logger.info(f"Cancelling profit target order {trade.profit_target_order_id} for {trade_id}")
+                                cancellation_success = self.cancel_order_with_verification(trade.profit_target_order_id, timeout=10)
+                                if cancellation_success:
+                                    trade.profit_target_status = "CANCELLED"
+                                    self.db.save_trade(trade)
+                                    self.logger.info(f"✓ GTC order cancelled for {trade_id}")
+                                else:
+                                    self.logger.error(f"✗ Failed to cancel GTC order {trade.profit_target_order_id} for {trade_id}")
+                                    trade.profit_target_status = "CANCEL_FAILED"
+                                    self.db.save_trade(trade)
                             self.db.update_command_status(command_id, 'COMPLETED', f'Position {trade_id} switched to manual control')
                             self.logger.info(f"[OK] Web command completed: Position {trade_id} now under manual control")
                         else:
@@ -2894,20 +3028,26 @@ class SPXCalendarTrader:
                             self.logger.error(f"Recent IBKR errors: {recent_errors}")
             
             if order_placed_successfully:
-                # Update trade record
-                trade.profit_target_order_id = profit_target_order_id
+                # Get IBKR's permanent order ID (what shows in TWS)
+                ibkr_perm_id = profit_target_order_id  # Default to client ID
+                if profit_target_order_id in self.wrapper.orders:
+                    ibkr_perm_id = self.wrapper.orders[profit_target_order_id].get('perm_id', profit_target_order_id)
+                    self.logger.info(f"✓ Captured IBKR permanent order ID: {ibkr_perm_id} (client ID was {profit_target_order_id})")
+                
+                # Update trade record with IBKR's permanent order ID
+                trade.profit_target_order_id = ibkr_perm_id  # Store IBKR's ID, not our client ID
                 trade.profit_target_price = profit_target_price
-                trade.profit_target_status = "PLACED"
+                trade.profit_target_status = "SUBMITTED"
                 
                 # Save to database
                 self.db.save_trade(trade)
                 
-                self.logger.info(f"[ACTIVE] GTC Profit target order ACTIVE: Order {profit_target_order_id} at ${profit_target_price:.2f}")
+                self.logger.info(f"[ACTIVE] GTC Profit target order ACTIVE: IBKR Order {ibkr_perm_id} at ${profit_target_price:.2f}")
                 
                 # Send notification
                 self.notifications.send_sms(
                     f"SPX Calendar: GTC profit target order ACTIVE for {trade.trade_id}. "
-                    f"Target: ${profit_target_price:.2f} (Order {profit_target_order_id})"
+                    f"Target: ${profit_target_price:.2f} (IBKR Order {ibkr_perm_id})"
                 )
                 
                 return True
@@ -2975,14 +3115,24 @@ class SPXCalendarTrader:
             if not active_trades:
                 return {"success": True, "message": "No active trades found"}
             
-            # Find trades missing GTC orders
+            # Find trades missing GTC orders (including invalid client-side IDs)
             missing_gtc = []
             for trade in active_trades:
-                if trade.status == "ACTIVE" and (trade.profit_target_order_id == 0 or trade.profit_target_status == "NONE"):
-                    missing_gtc.append(trade)
+                if trade.status == "ACTIVE":
+                    # Missing or invalid order IDs
+                    if (trade.profit_target_order_id == 0 or 
+                        trade.profit_target_order_id < 1000 or  # Client-side IDs are invalid
+                        trade.profit_target_status in ["NONE", "CANCEL_FAILED"]):
+                        missing_gtc.append(trade)
             
             if not missing_gtc:
-                return {"success": True, "message": f"All {len(active_trades)} active trades already have GTC orders"}
+                return {
+                    "success": True, 
+                    "message": f"All {len(active_trades)} active trades already have GTC orders",
+                    "placed": 0,
+                    "total_missing": 0,
+                    "failed_trades": []
+                }
             
             # Attempt to place missing GTC orders
             success_count = 0
@@ -3126,18 +3276,259 @@ class SPXCalendarTrader:
                 self.logger.warning("Cannot request open orders - not connected to IBKR")
         except Exception as e:
             self.logger.error(f"Error requesting open orders: {e}")
+    
+    def sync_gtc_order_ids_with_ibkr(self):
+        """
+        Sync database order IDs with IBKR's permanent order IDs.
+        This fixes trades that have client-side order IDs instead of IBKR permanent IDs.
+        """
+        try:
+            if not self.is_connected:
+                self.logger.error("Cannot sync order IDs - not connected to IBKR")
+                return False
+            
+            # Request all open orders from IBKR
+            self.logger.info("Syncing GTC order IDs with IBKR permanent order IDs...")
+            self.client.reqAllOpenOrders()
+            time.sleep(3)  # Give time for all orders to arrive
+            
+            # Get active trades from database
+            active_trades = self.db.get_active_trades()
+            
+            updated_count = 0
+            not_found_count = 0
+            not_found_trades = []
+            
+            for trade in active_trades:
+                if trade.profit_target_order_id > 0 and trade.profit_target_order_id < 1000:
+                    # This looks like a client-side order ID (small number), try to find the real IBKR ID
+                    client_order_id = trade.profit_target_order_id
+                    
+                    # Check if we have this order in memory with a perm_id
+                    if client_order_id in self.wrapper.orders:
+                        perm_id = self.wrapper.orders[client_order_id].get('perm_id', 0)
+                        if perm_id > 0 and perm_id != client_order_id:
+                            self.logger.info(f"✓ Found IBKR perm ID for {trade.trade_id}: {perm_id} (was {client_order_id})")
+                            trade.profit_target_order_id = perm_id
+                            trade.profit_target_status = self.wrapper.orders[client_order_id].get('status', 'SUBMITTED')
+                            self.db.save_trade(trade)
+                            updated_count += 1
+                        else:
+                            self.logger.warning(f"✗ Order {client_order_id} found but has no perm_id for {trade.trade_id}")
+                            not_found_count += 1
+                            not_found_trades.append(f"{trade.trade_id} (ID:{client_order_id})")
+                    else:
+                        self.logger.warning(f"✗ Order {client_order_id} not found in IBKR for {trade.trade_id}")
+                        not_found_count += 1
+                        not_found_trades.append(f"{trade.trade_id} (ID:{client_order_id})")
+                        # Mark as missing so it can be recreated
+                        trade.profit_target_order_id = 0
+                        trade.profit_target_status = "NONE"
+                        self.db.save_trade(trade)
+            
+            if updated_count > 0 or not_found_count > 0:
+                log_msg = f'Synced {updated_count} GTC orders'
+                if not_found_count > 0:
+                    log_msg += f', {not_found_count} not found in IBKR: {", ".join(not_found_trades)}'
+                self.logger.info(f"✓ {log_msg}")
+                self.db.log_daily_action('GTC_ORDER_SYNC', log_msg, not_found_count == 0)
+            else:
+                self.logger.info("No invalid order IDs found - all orders are valid")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error syncing GTC order IDs: {e}")
+            return False
+
+    def cancel_order_with_verification(self, order_id: int, timeout: int = 20, max_retries: int = 3) -> bool:
+        """
+        Cancel an order and wait for IBKR to confirm the cancellation.
+        Returns True if cancellation was confirmed, False otherwise.
+        CRITICAL: Uses multiple verification methods and retries to ensure order is truly cancelled.
+        """
+        try:
+            if not self.is_connected:
+                self.logger.error(f"Cannot cancel order {order_id} - not connected to IBKR")
+                return False
+            
+            for attempt in range(max_retries):
+                self.logger.info(f"🔄 Cancellation attempt {attempt + 1}/{max_retries} for order {order_id}")
+                
+                # Clear the cancellation tracking
+                self.wrapper.order_cancelled.clear()
+                if order_id in self.wrapper.cancelled_order_ids:
+                    self.wrapper.cancelled_order_ids.remove(order_id)
+                
+                # Request cancellation
+                self.logger.info(f"Requesting cancellation of order {order_id}...")
+                self.client.cancelOrder(order_id)
+                
+                # Wait for IBKR to confirm the cancellation
+                self.logger.info(f"Waiting up to {timeout} seconds for cancellation confirmation...")
+                if self.wrapper.order_cancelled.wait(timeout):
+                    # Check if THIS specific order was cancelled
+                    if order_id in self.wrapper.cancelled_order_ids:
+                        self.logger.info(f"✓ Order {order_id} cancellation confirmed by IBKR (attempt {attempt + 1})")
+                        # Triple-check: Request open orders to make absolutely sure
+                        time.sleep(2)
+                        self.request_open_orders()
+                        time.sleep(2)
+                        if order_id in self.wrapper.orders:
+                            status = self.wrapper.orders[order_id].get('status', 'Unknown')
+                            if status in ['Cancelled', 'ApiCancelled']:
+                                self.logger.info(f"✓✓ VERIFIED: Order {order_id} is {status}")
+                                return True
+                            else:
+                                self.logger.error(f"✗ FALSE POSITIVE: Order {order_id} still shows {status} - retrying")
+                                continue
+                        else:
+                            # Not in open orders = definitely cancelled
+                            self.logger.info(f"✓✓✓ CONFIRMED: Order {order_id} not in open orders (cancelled)")
+                            return True
+                
+                # If we get here, cancellation wasn't confirmed
+                self.logger.warning(f"⚠ Attempt {attempt + 1} failed - verifying order status")
+                time.sleep(3)  # Wait before checking
+                self.request_open_orders()
+                time.sleep(2)
+                
+                if order_id in self.wrapper.orders:
+                    order_status = self.wrapper.orders[order_id].get('status', 'Unknown')
+                    if order_status in ['Cancelled', 'ApiCancelled']:
+                        self.logger.info(f"✓ Order {order_id} confirmed cancelled (status: {order_status})")
+                        return True
+                    else:
+                        self.logger.warning(f"⚠ Order {order_id} still has status: {order_status} - will retry")
+                        # Try again
+                        continue
+                else:
+                    # Not in open orders - assume cancelled
+                    self.logger.info(f"✓ Order {order_id} not in open orders (cancelled)")
+                    return True
+            
+            # All retries exhausted
+            self.logger.error(f"✗✗✗ CRITICAL: Failed to cancel order {order_id} after {max_retries} attempts!")
+            return False
+                    
+        except Exception as e:
+            self.logger.error(f"Error cancelling order {order_id}: {e}")
+            return False
+    
+    def cancel_replace_order(self, order_id: int, contract, new_order) -> bool:
+        """
+        Cancel and replace an order with a modified price using IBKR's modify capability.
+        IBKR allows you to modify an order by calling placeOrder with the same order_id.
+        This is much more efficient than cancelling and placing a new order.
+        
+        Returns True if order was successfully modified, False otherwise.
+        """
+        try:
+            if not self.is_connected:
+                self.logger.error(f"Cannot modify order {order_id} - not connected to IBKR")
+                return False
+            
+            old_price = self.wrapper.orders.get(order_id, {}).get('lmt_price', 'Unknown')
+            self.logger.info(f"🔄 Modifying order {order_id}: ${old_price} → ${new_order.lmtPrice:.2f}")
+            
+            # Place the order with the SAME order_id - IBKR will modify it
+            self.client.placeOrder(order_id, contract, new_order)
+            
+            # Give IBKR a moment to process the modification
+            time.sleep(0.5)
+            
+            # Verify the modification was accepted
+            if order_id in self.wrapper.orders:
+                current_price = self.wrapper.orders[order_id].get('lmt_price', 0)
+                if abs(current_price - new_order.lmtPrice) < 0.01:  # Check within 1 cent
+                    self.logger.info(f"✓ Order {order_id} successfully modified to ${new_order.lmtPrice:.2f}")
+                    return True
+                else:
+                    self.logger.warning(f"⚠ Order {order_id} modification may not have taken effect (shows ${current_price:.2f})")
+                    return False
+            else:
+                # Order might not be in the dictionary yet - assume success for now
+                self.logger.info(f"✓ Order {order_id} modification sent (not yet in order book)")
+                return True
+                
+        except Exception as e:
+            self.logger.error(f"Error modifying order {order_id}: {e}")
+            return False
 
     def close_calendar_position(self, trade: CalendarSpread, reason: str):
         """Close a calendar spread position"""
         try:
             self.logger.info(f"Starting close process for {trade.trade_id}")
             
-            # Cancel any outstanding profit target order first
-            if trade.profit_target_order_id > 0 and trade.profit_target_status == "PLACED":
-                self.logger.info(f"Cancelling profit target order {trade.profit_target_order_id}")
-                self.client.cancelOrder(trade.profit_target_order_id)
-                trade.profit_target_status = "CANCELLED"
-                self.db.save_trade(trade)
+            # Cancel any outstanding profit target order first with proper verification
+            # CRITICAL: Always attempt to cancel if order_id exists, regardless of database status
+            # ABORT THE CLOSE IF CANCELLATION FAILS to prevent double positions
+            if trade.profit_target_order_id > 0 and trade.profit_target_status != "FILLED":
+                self.logger.info(f"🚨 CRITICAL: Must cancel GTC order {trade.profit_target_order_id} before closing position")
+                self.logger.info(f"Current GTC status in DB: {trade.profit_target_status}")
+                
+                # Use verified cancellation method with extended timeout and retries
+                cancellation_success = self.cancel_order_with_verification(
+                    trade.profit_target_order_id, 
+                    timeout=20,  # 20 seconds per attempt
+                    max_retries=3  # Up to 3 attempts
+                )
+                
+                if cancellation_success:
+                    self.logger.info(f"✅ GTC order {trade.profit_target_order_id} successfully cancelled")
+                    
+                    # FINAL SAFETY CHECK: Wait a few seconds and verify one more time
+                    self.logger.info(f"🔍 Final verification - waiting 5 seconds then checking order status...")
+                    time.sleep(5)
+                    self.request_open_orders()
+                    time.sleep(3)
+                    
+                    # Check if order still appears in open orders
+                    if trade.profit_target_order_id in self.wrapper.orders:
+                        final_status = self.wrapper.orders[trade.profit_target_order_id].get('status', 'Unknown')
+                        if final_status not in ['Cancelled', 'ApiCancelled']:
+                            self.logger.error(f"🛑 FINAL CHECK FAILED: Order {trade.profit_target_order_id} is {final_status}!")
+                            self.logger.error(f"🛑 ABORTING CLOSE - order is still active despite cancellation!")
+                            
+                            self.notifications.send_sms(
+                                f"🚨 CRITICAL: GTC order {trade.profit_target_order_id} for {trade.trade_id} "
+                                f"shows as {final_status} despite cancellation. Close ABORTED. "
+                                f"Manually cancel in TWS!"
+                            )
+                            
+                            trade.profit_target_status = "CANCEL_FAILED"
+                            self.db.save_trade(trade)
+                            return False
+                    
+                    self.logger.info(f"✅✅ FINAL CHECK PASSED - GTC order confirmed cancelled - safe to proceed")
+                    trade.profit_target_status = "CANCELLED"
+                    self.db.save_trade(trade)
+                else:
+                    # ABORT THE CLOSE - DO NOT CONTINUE
+                    self.logger.error(f"🛑 ABORT: Failed to cancel GTC order {trade.profit_target_order_id}")
+                    self.logger.error(f"🛑 CANNOT close position - GTC order may still be active!")
+                    self.logger.error(f"🛑 Closing position now would risk double fill if GTC executes!")
+                    
+                    # Send URGENT alert
+                    self.notifications.send_sms(
+                        f"🚨 CRITICAL: Cannot close {trade.trade_id} - GTC order {trade.profit_target_order_id} "
+                        f"failed to cancel after 3 attempts. MANUAL INTERVENTION REQUIRED. "
+                        f"Cancel order {trade.profit_target_order_id} in TWS before closing position!"
+                    )
+                    
+                    # Update database to reflect the critical state
+                    trade.profit_target_status = "CANCEL_FAILED"
+                    self.db.save_trade(trade)
+                    
+                    # Log to database
+                    self.db.log_daily_action(
+                        'CLOSE_ABORTED',
+                        f'ABORTED close of {trade.trade_id} - GTC order {trade.profit_target_order_id} cancellation failed',
+                        False
+                    )
+                    
+                    # RETURN FALSE - DO NOT CLOSE THE POSITION
+                    return False
             
             # Create the 4 option contracts
             short_put = self.create_spxw_contract(trade.short_expiry, trade.put_strike, "P")
@@ -3233,10 +3624,28 @@ class SPXCalendarTrader:
                 with open('web_debug.log', 'a') as f:
                     f.write(f"  Leg {i}: conId={leg.conId}, action={leg.action}\n")
             
-            # Attempt to fill the closing order with price improvement logic
+            # Attempt to fill the closing order with CANCEL/REPLACE - AGGRESSIVE!
             # Since we're BUYING the spread to close, we go DOWN in price if not filled
-            for attempt in range(self.config.max_price_attempts):
-                self.logger.info(f"Closing attempt {attempt + 1} with price ${-spread_mid:.2f} (negative for debit spread closing)")
+            self.logger.info(f"🚨 EXIT pricing strategy: Start ${spread_mid:.2f}")
+            self.logger.info(f"📊 EXIT timeout: {self.config.exit_fill_timeout}s per attempt, max {self.config.exit_max_attempts} attempts (AGGRESSIVE!)")
+            
+            # Get initial order ID (will reuse for cancel/replace)
+            if self.wrapper.next_order_id is None:
+                self.logger.error("No valid order ID from IBKR")
+                return False
+            
+            order_id = self.wrapper.next_order_id
+            self.wrapper.next_order_id += 1  # Increment for next trade
+            
+            self.logger.info(f"Using IBKR order ID {order_id}")
+            with open('web_debug.log', 'a') as f:
+                f.write(f"  Using IBKR order ID {order_id}\n")
+            
+            # Store the order ID we're waiting for to avoid confusion with other orders
+            waiting_for_order_id = order_id
+            
+            for attempt in range(self.config.exit_max_attempts):
+                self.logger.info(f"Closing attempt {attempt + 1}/{self.config.exit_max_attempts} with price ${-spread_mid:.2f} (negative for debit spread closing)")
                 
                 # Create limit order
                 close_order = Order()
@@ -3251,40 +3660,38 @@ class SPXCalendarTrader:
                 close_order.firmQuoteOnly = False
                 close_order.outsideRth = True  # Allow closing outside RTH
                 
-                # Use IBKR's next_order_id and increment it properly
-                if self.wrapper.next_order_id is None:
-                    self.logger.error("No valid order ID from IBKR")
-                    return False
-
-                order_id = self.wrapper.next_order_id
-                self.wrapper.next_order_id += 1  # Increment for next use
-
-                self.logger.info(f"Using IBKR order ID {order_id}")
-                with open('web_debug.log', 'a') as f:
-                    f.write(f"  Using IBKR order ID {order_id}\n")
-                
-                # Store the order ID we're waiting for to avoid confusion with other orders
-                waiting_for_order_id = order_id
-                
-                # Place the closing order
-                self.logger.info(f"About to place closing order {order_id} with IBKR...")
-                try:
-                    self.client.placeOrder(order_id, combo_contract, close_order)
-                    self.logger.info(f"Closing order placed (attempt {attempt + 1}): ID {order_id}, Price ${spread_mid:.2f}")
-                    
-                    with open('web_debug.log', 'a') as f:
-                        f.write(f"  Closing attempt {attempt + 1}: Order {order_id} at ${-spread_mid:.2f} (negative for debit spread)\n")
-                        f.write(f"  Order placed successfully with IBKR\n")
+                # First attempt: Place order. Subsequent attempts: Modify order (cancel/replace)
+                if attempt == 0:
+                    # Place the initial closing order
+                    self.logger.info(f"About to place closing order {order_id} with IBKR...")
+                    try:
+                        self.client.placeOrder(order_id, combo_contract, close_order)
+                        self.logger.info(f"Closing order placed: ID {order_id}, Price ${spread_mid:.2f}")
                         
-                except Exception as e:
-                    self.logger.error(f"Failed to place closing order {order_id}: {e}")
+                        with open('web_debug.log', 'a') as f:
+                            f.write(f"  Closing attempt 1: Order {order_id} at ${-spread_mid:.2f} (negative for debit spread)\n")
+                            f.write(f"  Order placed successfully with IBKR\n")
+                            
+                    except Exception as e:
+                        self.logger.error(f"Failed to place closing order {order_id}: {e}")
+                        with open('web_debug.log', 'a') as f:
+                            f.write(f"  ERROR placing order {order_id}: {e}\n")
+                        return False  # Can't proceed if we can't place the order
+                else:
+                    # Modify the existing order (cancel/replace) - MUCH FASTER!
+                    modify_success = self.cancel_replace_order(order_id, combo_contract, close_order)
+                    if not modify_success:
+                        self.logger.warning(f"⚠ Failed to modify closing order - this is concerning!")
+                    
+                    self.logger.info(f"Closing order adjusted (attempt {attempt + 1}): ID {order_id}, Price ${spread_mid:.2f}")
                     with open('web_debug.log', 'a') as f:
-                        f.write(f"  ERROR placing order {order_id}: {e}\n")
-                    continue  # Try next attempt
+                        f.write(f"  Closing attempt {attempt + 1}: Order {order_id} modified to ${-spread_mid:.2f}\n")
                 
-                # Wait for fill and check for immediate errors
-                fill_timeout = self.config.fill_wait_time
+                # Wait for fill with AGGRESSIVE timeout (exits are critical!)
+                fill_timeout = self.config.exit_fill_timeout
                 start_time = time.time()
+                
+                self.logger.info(f"Waiting up to {fill_timeout} seconds for order {waiting_for_order_id} to fill...")
                 
                 # Give IBKR a moment to respond with any immediate errors
                 time.sleep(2)
@@ -3330,24 +3737,65 @@ class SPXCalendarTrader:
                     
                     time.sleep(1)
                 
-                # Order didn't fill, cancel it and try with worse price
-                self.client.cancelOrder(waiting_for_order_id)
-                self.logger.info(f"Closing order {waiting_for_order_id} not filled, cancelled")
+                # Order didn't fill, will adjust price for next attempt (no cancellation - using cancel/replace!)
+                self.logger.warning(f"⚠️ EXIT order {waiting_for_order_id} not filled after {fill_timeout}s")
                 
                 # For closing (BUYING), go DOWN in price for next attempt
                 # Since we use negative prices, we subtract from the negative value (making it more negative)
-                spread_mid -= self.config.price_increment  # Decrease price by $0.05
-                
-                time.sleep(2)  # Brief pause between attempts
+                # Be MORE aggressive: double the increment after attempt 2
+                if attempt < self.config.exit_max_attempts - 1:
+                    if attempt >= 2:
+                        spread_mid -= (self.config.price_increment * 2)  # Decrease by $0.10 for later attempts
+                        self.logger.info(f"🚨 AGGRESSIVE pricing for attempt {attempt + 2}: ${-spread_mid:.2f}")
+                    else:
+                        spread_mid -= self.config.price_increment  # Decrease price by $0.05
+                        self.logger.info(f"💰 Will adjust price to ${-spread_mid:.2f} for attempt {attempt + 2}")
+                else:
+                    # Last attempt failed - cancel the order
+                    self.logger.warning(f"⚠️ Last exit attempt failed - cancelling order {waiting_for_order_id}")
+                    self.client.cancelOrder(waiting_for_order_id)
+                    time.sleep(2)
             
-            # All attempts failed
-            self.logger.warning(f"⚠️ All closing attempts failed for {trade.trade_id}")
+            # All attempts failed - THIS IS CRITICAL!
+            self.logger.error(f"🛑 CRITICAL: All {self.config.exit_max_attempts} closing attempts failed for {trade.trade_id}")
+            self.logger.error(f"🛑 Final attempt price: ${-spread_mid:.2f}")
             with open('web_debug.log', 'a') as f:
-                f.write(f"  ERROR: All {self.config.max_price_attempts} closing attempts failed\n")
+                f.write(f"  ERROR: All {self.config.exit_max_attempts} closing attempts failed\n")
+                f.write(f"  Final price attempted: ${-spread_mid:.2f}\n")
+            
+            # Send CRITICAL alert
+            self.notifications.send_sms(
+                f"🚨 CRITICAL: Failed to close {trade.trade_id} after {self.config.exit_max_attempts} attempts. "
+                f"Position remains OPEN. Final price: ${spread_mid:.2f}. MANUAL CLOSE REQUIRED!"
+            )
+            
+            # Log to database
+            self.db.log_daily_action(
+                'CLOSE_FAILED',
+                f'Failed to close {trade.trade_id} after {self.config.exit_max_attempts} attempts at prices ${trade.entry_credit:.2f} to ${spread_mid:.2f}',
+                False
+            )
+            
             return False
             
         except Exception as e:
-            self.logger.error(f"Error closing position {trade.trade_id}: {e}")
+            self.logger.error(f"🛑 EXCEPTION while closing position {trade.trade_id}: {e}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
+            
+            # Send alert about exception
+            self.notifications.send_sms(
+                f"🚨 CRITICAL: Exception closing {trade.trade_id}: {str(e)[:100]}. "
+                f"Position may still be OPEN. Check logs immediately!"
+            )
+            
+            # Log to database
+            self.db.log_daily_action(
+                'CLOSE_EXCEPTION',
+                f'Exception while closing {trade.trade_id}: {str(e)}',
+                False
+            )
+            
             return False
     
     def check_ghost_strikes(self, put_strike: float, call_strike: float) -> Tuple[bool, Optional[str]]:
