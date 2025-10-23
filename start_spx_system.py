@@ -39,10 +39,12 @@ def kill_existing_processes():
     except Exception as e:
         print(f"⚠️ Cleanup warning: {e}")
 
-def start_main_trading_system():
-    """Start the main trading system (spx_double_calendar.py)"""
-    print("🎯 Starting main trading system...")
-    print("   - Handles: Trading execution, scheduling, reconciliation")
+def start_unified_system():
+    """Start the unified trading system (includes web interface)"""
+    print("🎯 Starting unified SPX trading system...")
+    print("   - Trading execution, scheduling, reconciliation")
+    print("   - Integrated web interface at http://localhost:5000")
+    print("   - Single process, single IBKR connection")
     print("   - Schedules: 9:44:50 AM trades, 3:00 PM exits, 5:00 PM reconciliation")
     
     try:
@@ -58,37 +60,12 @@ def start_main_trading_system():
                 "python", "spx_double_calendar.py"
             ], preexec_fn=os.setsid)
         
-        print("✅ Main trading system started")
+        print("✅ Unified trading system started")
+        print("   - Trading + Web interface running in single process")
         return process
         
     except Exception as e:
-        print(f"❌ Failed to start main trading system: {e}")
-        return None
-
-def start_web_interface():
-    """Start the web dashboard (spx_web_manager.py)"""
-    print("🌐 Starting web dashboard...")
-    print("   - Access at: http://localhost:5000")
-    print("   - Features: Live P&L, manual controls, position management")
-    
-    try:
-        if sys.platform == "win32":
-            # Windows - start in new console window
-            process = subprocess.Popen([
-                "cmd", "/c", "start", "cmd", "/k",
-                f"cd /d {os.getcwd()} && python spx_web_manager.py"
-            ], shell=True)
-        else:
-            # Linux/Mac
-            process = subprocess.Popen([
-                "python", "spx_web_manager.py"
-            ], preexec_fn=os.setsid)
-        
-        print("✅ Web dashboard started")
-        return process
-        
-    except Exception as e:
-        print(f"❌ Failed to start web dashboard: {e}")
+        print(f"❌ Failed to start unified trading system: {e}")
         return None
 
 def wait_for_services():
@@ -116,26 +93,28 @@ def wait_for_services():
 def show_system_status():
     """Show what's running and how to access it"""
     print("\n" + "=" * 60)
-    print("🎉 SPX CALENDAR SYSTEM IS RUNNING!")
+    print("🎉 SPX CALENDAR UNIFIED SYSTEM IS RUNNING!")
     print("=" * 60)
     print()
-    print("📊 COMPONENTS ACTIVE:")
-    print("   ✅ Main Trading System (spx_double_calendar.py)")
+    print("📊 SYSTEM COMPONENTS:")
+    print("   ✅ Trading Engine")
     print("      - Automated trading at 9:44:50 AM")
     print("      - Time-based exits at 3:00 PM") 
     print("      - Position reconciliation at 5:00 PM")
     print()
-    print("   ✅ Web Dashboard (spx_web_manager.py)")
+    print("   ✅ Web Dashboard")
     print("      - Live P&L monitoring")
     print("      - Manual trade controls")
     print("      - Position management")
+    print("      - Runs in same process as trading engine")
     print()
     print("🌐 ACCESS YOUR DASHBOARD:")
     print("   👉 http://localhost:5000")
     print()
     print("🛑 TO STOP THE SYSTEM:")
-    print("   - Close both console windows")
+    print("   - Close the console window")
     print("   - Or run: python restart_system.py")
+    print("   - Or press Ctrl+C in the console")
     print()
     print("📋 SCHEDULED ACTIVITIES:")
     print("   🕘 9:44:50 AM - Daily trade execution")
@@ -152,24 +131,19 @@ def main():
     # Step 1: Clean up any existing processes
     kill_existing_processes()
     
-    # Step 2: Start main trading system
-    main_process = start_main_trading_system()
-    if not main_process:
-        print("❌ Cannot continue without main trading system")
+    # Step 2: Start unified system (trading + web interface together)
+    unified_process = start_unified_system()
+    if not unified_process:
+        print("❌ Failed to start trading system")
         return False
     
-    # Give main system time to initialize
-    time.sleep(3)
+    # Give system time to initialize
+    time.sleep(5)
     
-    # Step 3: Start web interface
-    web_process = start_web_interface()
-    if not web_process:
-        print("⚠️ Web dashboard failed to start, but main system is running")
-    
-    # Step 4: Wait for services to be ready
+    # Step 3: Wait for web interface to be ready
     wait_for_services()
     
-    # Step 5: Show status and instructions
+    # Step 4: Show status and instructions
     show_system_status()
     
     return True

@@ -26,6 +26,10 @@ import pytz
 import requests
 import smtplib
 import ssl
+import json
+
+# Flask imports for web interface
+from flask import Flask, render_template, request, jsonify, redirect, url_for, flash
 
 # IBKR API imports
 from ibapi.client import EClient
@@ -961,6 +965,12 @@ class SPXCalendarTrader:
         self.current_spx_price = 0.0
         self.req_id_counter = 1000
         
+        # CRITICAL: Trade execution lock to prevent duplicate trades
+        import threading
+        self.trade_execution_lock = threading.Lock()
+        self.trade_in_progress = False
+        self.trade_in_progress_since = None
+        
         # Streaming market data
         self.streaming_positions = {}  # trade_id -> {req_ids: [], contracts: [], last_pnl: float}
         self.spx_stream_req_id = None
@@ -1873,6 +1883,26 @@ class SPXCalendarTrader:
         print("🔌 Connecting to IBKR for scheduled operations...")
         if self.connect_to_ibkr():
             print("✅ IBKR connection established")
+            
+            # Start streaming for SPX and active positions
+            try:
+                print("📊 Starting SPX streaming...")
+                self.start_spx_streaming()
+                
+                # Start streaming for active positions
+                active_trades = self.db.get_active_trades()
+                if active_trades:
+                    print(f"📊 Starting streaming for {len(active_trades)} active position(s)...")
+                    for trade in active_trades:
+                        if trade.status == "ACTIVE":
+                            try:
+                                self.start_position_streaming(trade)
+                            except Exception as e:
+                                print(f"⚠️ Failed to start streaming for {trade.trade_id}: {e}")
+                
+                print("✅ Market data streaming started")
+            except Exception as e:
+                print(f"⚠️ Failed to start streaming: {e}")
         else:
             print("⚠️ IBKR connection failed - will retry when needed")
         
@@ -1936,7 +1966,24 @@ class SPXCalendarTrader:
         import traceback
         import inspect
         
+        # 🛑 CRITICAL: Check if trade already in progress (race condition protection)
+        if not self.trade_execution_lock.acquire(blocking=False):
+            # Another trade execution is already in progress!
+            error_msg = f"🛑 TRADE ALREADY IN PROGRESS! Blocked concurrent execution attempt."
+            if self.trade_in_progress_since:
+                elapsed = (self.get_local_time() - self.trade_in_progress_since).total_seconds()
+                error_msg += f" Started {elapsed:.1f} seconds ago."
+            
+            self.logger.error(error_msg)
+            self.db.log_daily_action("CONCURRENT_BLOCKED", error_msg, True)
+            self.notifications.send_sms(f"🛑 DUPLICATE PREVENTED: Trade already executing!")
+            return
+        
         try:
+            # Mark trade as in progress
+            self.trade_in_progress = True
+            self.trade_in_progress_since = self.get_local_time()
+            
             # CRITICAL: Log who called this function and when
             current_time = self.get_local_time()
             caller_frame = inspect.currentframe().f_back
@@ -1946,6 +1993,36 @@ class SPXCalendarTrader:
             self.logger.warning(f"{trade_type} TRADE EXECUTION TRIGGERED at {current_time.strftime('%Y-%m-%d %H:%M:%S')} by {caller_info}")
             self.logger.warning(f"Force execution: {force_execution}, Manual: {is_manual}")
             self.logger.warning(f"Call stack: {''.join(traceback.format_stack())}")
+            
+            # 🛑 CRITICAL DUPLICATE PREVENTION: Check if we already traded today
+            # This protects against accidental manual trades after automated execution
+            today = self.get_local_time().strftime('%Y-%m-%d')
+            existing_trades_today = self.db.get_trade_count_for_date(today)
+            
+            if existing_trades_today > 0:
+                message = f"🛑 DUPLICATE TRADE PREVENTED: {existing_trades_today} trade(s) already executed today ({today})"
+                self.logger.error(message)
+                self.db.log_daily_action("DUPLICATE_PREVENTED", message, True)
+                
+                # Get today's trades for details
+                conn = sqlite3.connect(self.db.db_path)
+                cursor = conn.cursor()
+                cursor.execute('SELECT trade_id, entry_time, put_strike, call_strike FROM calendar_trades WHERE entry_date = ? AND status != "CANCELLED"', (today,))
+                trades_today = cursor.fetchall()
+                conn.close()
+                
+                if trades_today:
+                    for trade_id, entry_time, put_strike, call_strike in trades_today:
+                        self.logger.error(f"  Existing trade: {trade_id} at {entry_time}, strikes {put_strike}P/{call_strike}C")
+                
+                # Send urgent alert
+                self.notifications.send_sms(
+                    f"🛑 DUPLICATE TRADE PREVENTED! {trade_type} trade blocked. "
+                    f"Already executed {existing_trades_today} trade(s) today. "
+                    f"System protected you from duplicate execution."
+                )
+                
+                return  # ABORT - do not execute
             
             # Step 1: Get current SPX price
             self.current_spx_price = self.get_spx_price()
@@ -2108,6 +2185,12 @@ class SPXCalendarTrader:
             self.logger.error(error_msg)
             self.db.log_daily_action("ENTRY_ERROR", error_msg, False)
             self.notifications.notify_trade_failed(error_msg)
+        finally:
+            # CRITICAL: Always release the lock, no matter what!
+            self.trade_in_progress = False
+            self.trade_in_progress_since = None
+            self.trade_execution_lock.release()
+            self.logger.info("🔓 Trade execution lock released")
     
     def place_calendar_spread_order(self, trade: CalendarSpread, long_put_strike: float = None, long_call_strike: float = None) -> bool:
         """Place the 4-leg calendar spread order with price improvement logic"""
@@ -4372,6 +4455,769 @@ class ManualOverride:
                 print(f"  {status} {timestamp}: {action} - {message}")
 
 # ===============================================
+# WEB INTERFACE (Flask) - Integrated into main system
+# ===============================================
+
+# Global trader instance that both scheduler and web interface share
+_global_trader_instance = None
+
+# Create Flask app at module level
+app = Flask(__name__)
+app.secret_key = 'spx_calendar_trading_system_2024'
+app.jinja_env.globals['abs'] = abs
+
+def set_global_trader(trader: SPXCalendarTrader):
+    """Set the global trader instance that Flask routes will use"""
+    global _global_trader_instance
+    _global_trader_instance = trader
+
+def get_trader() -> SPXCalendarTrader:
+    """Get the global trader instance"""
+    return _global_trader_instance
+
+# Flask Routes - All use get_trader() to access the SAME trader instance
+@app.route('/')
+def dashboard():
+    """Main dashboard showing system status and active positions"""
+    trader = get_trader()
+    if not trader:
+        return "System initializing...", 503
+    
+    # Get active positions
+    active_trades = trader.db.get_active_trades()
+    
+    # Enhance P&L for each trade
+    for trade in active_trades:
+        trade.pnl_per_contract = 0.0
+        trade.pnl_total = 0.0
+        trade.current_spread_price = 0.0
+        trade.current_value = 0.0
+        trade.unrealized_pnl = 0.0
+        
+        trade.spx_price = float(trade.spx_price) if trade.spx_price else 0.0
+        trade.put_strike = float(trade.put_strike) if trade.put_strike else 0.0
+        trade.call_strike = float(trade.call_strike) if trade.call_strike else 0.0
+        trade.entry_credit = float(trade.entry_credit) if trade.entry_credit else 0.0
+        trade.profit_target = float(trade.profit_target) if trade.profit_target else 0.0
+        
+        if trade.status == "ACTIVE":
+            streaming_result = trader.get_streaming_pnl(trade.trade_id)
+            if streaming_result:
+                current_spread_price, unrealized_pnl = streaming_result
+                trade.current_value = current_spread_price
+                trade.unrealized_pnl = unrealized_pnl
+            
+            if trade.unrealized_pnl != 0:
+                try:
+                    trade.pnl_per_contract = float(trade.unrealized_pnl) * 100
+                    trade.pnl_total = trade.pnl_per_contract * trader.config.position_size
+                except (ValueError, TypeError):
+                    pass
+            
+            if trade.current_value is not None:
+                try:
+                    trade.current_spread_price = float(trade.current_value)
+                except (ValueError, TypeError):
+                    pass
+        
+        # Calculate days since entry
+        try:
+            entry_date = datetime.strptime(trade.entry_date, '%Y-%m-%d')
+            trade.days_since_entry = (datetime.now() - entry_date).days
+        except:
+            trade.days_since_entry = 0
+        
+        # Format expiration dates
+        try:
+            short_expiry_date = datetime.strptime(trade.short_expiry, '%Y%m%d')
+            trade.short_expiry_display = short_expiry_date.strftime('%m/%d')
+            long_expiry_date = datetime.strptime(trade.long_expiry, '%Y%m%d')
+            trade.long_expiry_display = long_expiry_date.strftime('%m/%d')
+        except:
+            trade.short_expiry_display = "N/A"
+            trade.long_expiry_display = "N/A"
+        
+        # Calculate exit date
+        try:
+            exit_date = entry_date + timedelta(days=trader.config.exit_day)
+            trade.exit_date_display = exit_date.strftime('%m/%d')
+        except:
+            trade.exit_date_display = "N/A"
+    
+    # Calculate total P&L
+    total_pnl = sum(trade.pnl_total for trade in active_trades if trade.status == "ACTIVE" and hasattr(trade, 'pnl_total') and trade.pnl_total)
+    
+    # Get today's activity
+    today = datetime.now().strftime('%Y-%m-%d')
+    today_count = trader.db.get_trade_count_for_date(today)
+    
+    # Get recent logs
+    conn = sqlite3.connect(trader.db.db_path)
+    cursor = conn.cursor()
+    cursor.execute('SELECT action, message, success, timestamp FROM daily_log ORDER BY timestamp DESC LIMIT 10')
+    raw_logs = cursor.fetchall()
+    conn.close()
+    
+    # Convert timestamps to Eastern Time
+    recent_logs = []
+    eastern_tz = pytz.timezone('US/Eastern')
+    for action, message, success, timestamp in raw_logs:
+        try:
+            if isinstance(timestamp, str):
+                dt_naive = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                dt_utc = pytz.UTC.localize(dt_naive)
+            else:
+                dt_utc = pytz.UTC.localize(timestamp) if timestamp.tzinfo is None else timestamp
+            et_time = dt_utc.astimezone(eastern_tz)
+            formatted_time = et_time.strftime('%Y-%m-%d %H:%M:%S')
+            recent_logs.append((action, message, success, formatted_time))
+        except Exception:
+            recent_logs.append((action, message, success, str(timestamp)))
+    
+    # Get SPX price
+    spx_price = trader.get_spx_price() if trader.is_connected else None
+    
+    # System status
+    system_status = {
+        'connected': trader.is_connected,
+        'scheduler_running': True,  # Always true in unified system
+        'active_positions': len(active_trades),
+        'max_positions': trader.config.max_concurrent_positions,
+        'trades_today': today_count,
+        'target_delta': trader.config.target_delta,
+        'position_size': trader.config.position_size,
+        'profit_target': f"{trader.config.profit_target_pct * 100}%",
+        'spx_price': spx_price,
+        'spx_change': 0.0,
+        'spx_change_pct': 0.0
+    }
+    
+    return render_template('dashboard.html', 
+                         trades=active_trades,
+                         active_trades=active_trades,
+                         system_status=system_status,
+                         recent_logs=recent_logs,
+                         total_pnl=total_pnl)
+
+@app.route('/positions')
+def positions():
+    """View all positions with detailed information"""
+    trader = get_trader()
+    if not trader:
+        return "System initializing...", 503
+    
+    active_trades = trader.db.get_active_trades()
+    
+    # Calculate metrics for each trade (same as dashboard)
+    for trade in active_trades:
+        trade.pnl_per_contract = 0.0
+        trade.pnl_total = 0.0
+        trade.current_spread_price = 0.0
+        trade.current_value = 0.0
+        trade.unrealized_pnl = 0.0
+        
+        trade.spx_price = float(trade.spx_price) if trade.spx_price else 0.0
+        trade.put_strike = float(trade.put_strike) if trade.put_strike else 0.0
+        trade.call_strike = float(trade.call_strike) if trade.call_strike else 0.0
+        trade.entry_credit = float(trade.entry_credit) if trade.entry_credit else 0.0
+        trade.profit_target = float(trade.profit_target) if trade.profit_target else 0.0
+        
+        if trade.status == "ACTIVE":
+            streaming_result = trader.get_streaming_pnl(trade.trade_id)
+            if streaming_result:
+                current_spread_price, unrealized_pnl = streaming_result
+                trade.current_value = current_spread_price
+                trade.unrealized_pnl = unrealized_pnl
+                if trade.unrealized_pnl != 0:
+                    trade.pnl_per_contract = float(trade.unrealized_pnl) * 100
+                    trade.pnl_total = trade.pnl_per_contract * trader.config.position_size
+                if trade.current_value is not None:
+                    trade.current_spread_price = float(trade.current_value)
+        
+        # Calculate days since entry and to expiry
+        entry_date = datetime.strptime(trade.entry_date, '%Y-%m-%d')
+        trade.days_since_entry = (datetime.now() - entry_date).days
+        
+        try:
+            short_expiry_date = datetime.strptime(trade.short_expiry, '%Y%m%d')
+            trade.short_expiry_display = short_expiry_date.strftime('%m/%d')
+            long_expiry_date = datetime.strptime(trade.long_expiry, '%Y%m%d')
+            trade.long_expiry_display = long_expiry_date.strftime('%m/%d')
+            trade.days_to_expiry = (short_expiry_date - datetime.now()).days
+        except:
+            trade.short_expiry_display = "N/A"
+            trade.long_expiry_display = "N/A"
+            trade.days_to_expiry = 0
+        
+        try:
+            exit_date = entry_date + timedelta(days=trader.config.exit_day)
+            trade.exit_date_display = exit_date.strftime('%m/%d')
+        except:
+            trade.exit_date_display = "N/A"
+        
+        # Calculate profit percentage
+        if trade.entry_credit != 0:
+            trade.profit_pct = (trade.unrealized_pnl / abs(trade.entry_credit)) * 100
+        else:
+            trade.profit_pct = 0
+    
+    return render_template('positions.html', trades=active_trades)
+
+@app.route('/close_position/<trade_id>', methods=['POST'])
+def close_position(trade_id):
+    """Close a specific position"""
+    trader = get_trader()
+    if not trader:
+        flash('System not ready', 'error')
+        return redirect(url_for('positions'))
+    
+    try:
+        trade = trader.db.get_trade_by_id(trade_id)
+        if not trade:
+            flash(f'Trade {trade_id} not found', 'error')
+            return redirect(url_for('positions'))
+        
+        # Close the position
+        success = trader.close_calendar_position(trade, "Manual close via web interface")
+        
+        if success:
+            flash(f'✅ Position {trade_id} closed successfully', 'success')
+        else:
+            flash(f'❌ Failed to close position {trade_id}. Check logs for details.', 'error')
+        
+    except Exception as e:
+        flash(f'Error closing position: {str(e)}', 'error')
+    
+    return redirect(url_for('positions'))
+
+@app.route('/stop_managing/<trade_id>', methods=['POST'])
+def stop_managing(trade_id):
+    """Stop system management of a position (manual takeover)"""
+    trader = get_trader()
+    if not trader:
+        flash('System not ready', 'error')
+        return redirect(url_for('positions'))
+    
+    try:
+        trade = trader.db.get_trade_by_id(trade_id)
+        if not trade:
+            flash(f'Trade {trade_id} not found', 'error')
+            return redirect(url_for('positions'))
+        
+        # Update trade status to manual control
+        trade.status = "MANUAL_CONTROL"
+        trade.exit_reason = "Manual takeover from web interface"
+        trade.exit_date = datetime.now().strftime('%Y-%m-%d')
+        trade.exit_time = datetime.now().strftime('%H:%M:%S')
+        
+        # Save the updated trade
+        trader.db.save_trade(trade)
+        
+        # Log the takeover
+        trader.db.log_daily_action(
+            "MANUAL_TAKEOVER",
+            f"Position {trade_id} taken over for manual management via web interface",
+            True
+        )
+        
+        flash(f'✅ Position {trade_id} is now under manual control. System will no longer manage it.', 'warning')
+        
+    except Exception as e:
+        flash(f'Error stopping management: {str(e)}', 'error')
+    
+    return redirect(url_for('positions'))
+
+@app.route('/record_manual_close/<trade_id>', methods=['POST'])
+def record_manual_close(trade_id):
+    """Record manual close of a position that was under manual control"""
+    trader = get_trader()
+    if not trader:
+        flash('System not ready', 'error')
+        return redirect(url_for('positions'))
+    
+    try:
+        trade = trader.db.get_trade_by_id(trade_id)
+        if not trade:
+            flash(f'Trade {trade_id} not found', 'error')
+            return redirect(url_for('positions'))
+        
+        if trade.status != "MANUAL_CONTROL":
+            flash(f'Trade {trade_id} is not under manual control', 'error')
+            return redirect(url_for('positions'))
+        
+        # Get form data
+        exit_price = float(request.form.get('exit_price', 0))
+        exit_date = request.form.get('exit_date', '')
+        exit_time = request.form.get('exit_time', '')
+        
+        if not exit_price or not exit_date or not exit_time:
+            flash('All fields are required', 'error')
+            return redirect(url_for('positions'))
+        
+        # Calculate P&L
+        pnl = exit_price - trade.entry_credit
+        
+        # Update trade record
+        trade.status = "CLOSED"
+        trade.exit_reason = "Manual close recorded"
+        trade.exit_date = exit_date
+        trade.exit_time = exit_time
+        trade.exit_credit = exit_price
+        trade.realized_pnl = pnl
+        
+        # Save the updated trade
+        trader.db.save_trade(trade)
+        
+        # Log the action
+        trader.db.log_daily_action(
+            'MANUAL_CLOSE_RECORDED',
+            f'Manual close recorded for {trade_id}: ${exit_price:.2f}, P&L: ${pnl:.2f}',
+            True
+        )
+        
+        # Send notification
+        trader.notifications.send_sms(f"SPX Calendar: Manual close recorded for {trade_id}. Exit: ${exit_price:.2f}, P&L: ${pnl:.2f}")
+        
+        flash(f'✅ Manual close recorded for {trade_id}. P&L: ${pnl:.2f}', 'success')
+        
+    except ValueError:
+        flash('Invalid exit price format', 'error')
+    except Exception as e:
+        flash(f'Error recording manual close: {str(e)}', 'error')
+    
+    return redirect(url_for('positions'))
+
+@app.route('/manual_trade', methods=['GET', 'POST'])
+def manual_trade():
+    """Manual trade execution page"""
+    trader = get_trader()
+    if not trader:
+        flash('System not ready', 'error')
+        return redirect(url_for('dashboard'))
+    
+    if request.method == 'POST':
+        try:
+            # Execute manual trade
+            trader.execute_calendar_spread_entry(is_manual=True)
+            flash('Manual trade execution initiated', 'success')
+        except Exception as e:
+            flash(f'Manual trade error: {str(e)}', 'error')
+        
+        return redirect(url_for('dashboard'))
+    
+    return render_template('manual_trade.html')
+
+@app.route('/import_trade', methods=['GET', 'POST'])
+def import_trade():
+    """Import a manually executed trade for system management"""
+    trader = get_trader()
+    if not trader:
+        flash('System not ready', 'error')
+        return redirect(url_for('dashboard'))
+    
+    if request.method == 'POST':
+        try:
+            from spx_double_calendar import CalendarSpread
+            
+            # Get form data
+            entry_date = request.form.get('entry_date')
+            entry_time = request.form.get('entry_time', '09:45:00')
+            put_strike = float(request.form.get('put_strike'))
+            call_strike = float(request.form.get('call_strike'))
+            short_expiry = request.form.get('short_expiry')
+            long_expiry = request.form.get('long_expiry')
+            entry_price = float(request.form.get('entry_price'))
+            spx_price = float(request.form.get('spx_price', 0))
+            
+            # Validate required fields
+            if not all([entry_date, put_strike, call_strike, short_expiry, long_expiry, entry_price]):
+                flash('All fields are required', 'error')
+                return render_template('import_trade.html')
+            
+            # Convert date formats
+            try:
+                short_exp_date = datetime.strptime(short_expiry, '%m/%d/%Y')
+                long_exp_date = datetime.strptime(long_expiry, '%m/%d/%Y')
+                short_expiry_formatted = short_exp_date.strftime('%Y%m%d')
+                long_expiry_formatted = long_exp_date.strftime('%Y%m%d')
+                entry_date_obj = datetime.strptime(entry_date, '%Y-%m-%d')
+            except ValueError as e:
+                flash(f'Invalid date format: {e}', 'error')
+                return render_template('import_trade.html')
+            
+            # Create trade ID
+            trade_id = f"CAL_{entry_date.replace('-', '')}_IMPORT"
+            
+            # Check if trade already exists
+            existing_trade = trader.db.get_trade_by_id(trade_id)
+            if existing_trade:
+                flash(f'Trade {trade_id} already exists', 'error')
+                return render_template('import_trade.html')
+            
+            # Create CalendarSpread object
+            trade = CalendarSpread(
+                trade_id=trade_id,
+                entry_date=entry_date,
+                entry_time=entry_time,
+                spx_price=spx_price if spx_price > 0 else trader.get_spx_price(),
+                short_expiry=short_expiry_formatted,
+                long_expiry=long_expiry_formatted,
+                put_strike=put_strike,
+                call_strike=call_strike,
+                long_put_strike=put_strike,
+                long_call_strike=call_strike,
+                entry_credit=entry_price,
+                status="ACTIVE",
+                fill_status="FILLED"
+            )
+            
+            # Calculate profit target
+            trade.profit_target = entry_price + (entry_price * trader.config.profit_target_pct)
+            
+            # Save to database
+            trader.db.save_trade(trade)
+            
+            # Log the import
+            trader.db.log_daily_action(
+                'TRADE_IMPORTED',
+                f'Manual trade imported: {trade_id} at ${entry_price:.2f}',
+                True
+            )
+            
+            # Start streaming for the imported position
+            try:
+                trader.start_position_streaming(trade)
+            except Exception as stream_error:
+                print(f"⚠️ Failed to start streaming for {trade_id}: {stream_error}")
+            
+            # Send notification
+            trader.notifications.send_sms(
+                f"SPX Calendar: Imported trade {trade_id}. Entry: ${entry_price:.2f}, "
+                f"Target: ${trade.profit_target:.2f}. Now under system management."
+            )
+            
+            flash(f'✅ Trade {trade_id} imported successfully!', 'success')
+            return redirect(url_for('dashboard'))
+            
+        except ValueError as e:
+            flash(f'Invalid number format: {e}', 'error')
+        except Exception as e:
+            flash(f'Error importing trade: {e}', 'error')
+    
+    return render_template('import_trade.html')
+
+@app.route('/history')
+def trade_history():
+    """View trade history"""
+    trader = get_trader()
+    if not trader:
+        return "System initializing...", 503
+    
+    # Get trade history
+    conn = sqlite3.connect(trader.db.db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT trade_id, entry_date, entry_time, spx_price, put_strike, call_strike, 
+               entry_credit, status, exit_reason, exit_date, exit_time, exit_spx_price, 
+               exit_credit, realized_pnl, short_expiry, long_expiry
+        FROM calendar_trades 
+        ORDER BY entry_date DESC, entry_time DESC 
+        LIMIT 50
+    ''')
+    trades = cursor.fetchall()
+    conn.close()
+    
+    # Convert to list of dicts
+    trade_list = []
+    for trade in trades:
+        trade_dict = {
+            'trade_id': trade[0],
+            'entry_date': trade[1],
+            'entry_time': trade[2],
+            'spx_price': trade[3],
+            'put_strike': trade[4],
+            'call_strike': trade[5],
+            'entry_credit': trade[6],
+            'status': trade[7],
+            'exit_reason': trade[8],
+            'exit_date': trade[9],
+            'exit_time': trade[10],
+            'exit_spx_price': trade[11],
+            'exit_credit': trade[12],
+            'pnl': trade[13],
+            'short_expiry': trade[14],
+            'long_expiry': trade[15]
+        }
+        
+        # Format expiration dates
+        try:
+            if trade_dict['short_expiry']:
+                short_expiry_date = datetime.strptime(trade_dict['short_expiry'], '%Y%m%d')
+                trade_dict['short_expiry_display'] = short_expiry_date.strftime('%m/%d')
+            else:
+                trade_dict['short_expiry_display'] = "N/A"
+            if trade_dict['long_expiry']:
+                long_expiry_date = datetime.strptime(trade_dict['long_expiry'], '%Y%m%d')
+                trade_dict['long_expiry_display'] = long_expiry_date.strftime('%m/%d')
+            else:
+                trade_dict['long_expiry_display'] = "N/A"
+        except:
+            trade_dict['short_expiry_display'] = "N/A"
+            trade_dict['long_expiry_display'] = "N/A"
+        
+        # Calculate actual P&L
+        if trade_dict['pnl'] and trader.config.position_size:
+            trade_dict['actual_pnl'] = trade_dict['pnl'] * trader.config.position_size * 100
+        else:
+            trade_dict['actual_pnl'] = (trade_dict['pnl'] * 100) if trade_dict['pnl'] else 0
+        
+        # Calculate profit percentage
+        if trade_dict['entry_credit'] and trade_dict['entry_credit'] != 0:
+            trade_dict['profit_pct'] = (trade_dict['pnl'] / abs(trade_dict['entry_credit'])) * 100 if trade_dict['pnl'] else 0
+        else:
+            trade_dict['profit_pct'] = 0
+        
+        trade_list.append(trade_dict)
+    
+    return render_template('history.html', trades=trade_list)
+
+@app.route('/logs')
+def view_logs():
+    """View system logs"""
+    trader = get_trader()
+    if not trader:
+        return "System initializing...", 503
+    
+    conn = sqlite3.connect(trader.db.db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT action, message, success, timestamp 
+        FROM daily_log 
+        ORDER BY timestamp DESC 
+        LIMIT 100
+    ''')
+    raw_logs = cursor.fetchall()
+    conn.close()
+    
+    # Convert timestamps to Eastern Time
+    logs = []
+    eastern_tz = pytz.timezone('US/Eastern')
+    for action, message, success, timestamp_str in raw_logs:
+        try:
+            utc_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+            utc_time = pytz.utc.localize(utc_time)
+            eastern_time = utc_time.astimezone(eastern_tz)
+            formatted_time = eastern_time.strftime('%Y-%m-%d %H:%M:%S %Z')
+            logs.append((action, message, success, formatted_time))
+        except Exception:
+            logs.append((action, message, success, timestamp_str))
+    
+    return render_template('logs.html', logs=logs)
+
+@app.route('/system')
+def system_management():
+    """Combined system management page with settings and status"""
+    trader = get_trader()
+    if not trader:
+        return "System initializing...", 503
+    
+    # Get system information
+    system_info = {
+        'connected': trader.is_connected,
+        'scheduler_running': True,  # Always running in unified system
+        'host': trader.config.ib_host,
+        'port': trader.config.ib_port,
+        'client_id': trader.config.ib_client_id,
+        'active_positions': len(trader.db.get_active_trades()),
+        'max_positions': trader.config.max_concurrent_positions,
+        'position_size': trader.config.position_size,
+        'trades_today': trader.db.get_trade_count_for_date(datetime.now().strftime('%Y-%m-%d')),
+        'spx_price': trader.current_spx_price if hasattr(trader, 'current_spx_price') else None,
+        'db_path': trader.config.db_path,
+        'total_trades': trader.db.get_total_trade_count(),
+        'last_update': datetime.now().strftime('%H:%M:%S')
+    }
+    
+    # Get all settings organized by category
+    settings_by_category = trader.db.get_all_settings()
+    
+    return render_template('system_combined.html', 
+                         system_status=system_info, 
+                         settings_by_category=settings_by_category)
+
+@app.route('/update_settings', methods=['POST'])
+def update_settings():
+    """Update system settings"""
+    trader = get_trader()
+    if not trader:
+        flash('System not ready', 'error')
+        return redirect(url_for('system_management'))
+    
+    try:
+        # Get form data
+        for setting_name in request.form:
+            if setting_name.startswith('setting_'):
+                actual_name = setting_name[8:]
+                new_value = request.form[setting_name]
+                
+                # Get the current setting to determine type
+                current_settings = trader.db.get_all_settings()
+                setting_found = False
+                
+                for category_settings in current_settings.values():
+                    for setting in category_settings:
+                        if setting['name'] == actual_name:
+                            setting_type = setting['type']
+                            
+                            # Validate numeric ranges
+                            if setting_type in ['int', 'float']:
+                                try:
+                                    numeric_value = float(new_value) if setting_type == 'float' else int(new_value)
+                                    
+                                    if setting['min_value'] is not None and numeric_value < setting['min_value']:
+                                        flash(f'❌ {actual_name}: Value {numeric_value} is below minimum {setting["min_value"]}', 'error')
+                                        continue
+                                    if setting['max_value'] is not None and numeric_value > setting['max_value']:
+                                        flash(f'❌ {actual_name}: Value {numeric_value} is above maximum {setting["max_value"]}', 'error')
+                                        continue
+                                    
+                                    new_value = numeric_value
+                                except ValueError:
+                                    flash(f'❌ {actual_name}: Invalid {setting_type} value: {new_value}', 'error')
+                                    continue
+                            
+                            # Update the setting
+                            trader.db.set_setting(actual_name, new_value, setting_type)
+                            setting_found = True
+                            break
+                    if setting_found:
+                        break
+        
+        # Reload configuration from database
+        trader.config.load_from_database()
+        
+        flash('✅ Settings updated successfully! Most changes take effect immediately.', 'success')
+        
+    except Exception as e:
+        flash(f'❌ Error updating settings: {str(e)}', 'error')
+    
+    return redirect(url_for('system_management'))
+
+@app.route('/place_missing_gtc_orders')
+def place_missing_gtc_orders():
+    """Place missing GTC orders"""
+    trader = get_trader()
+    if not trader:
+        flash('System not ready', 'error')
+        return redirect(url_for('dashboard'))
+    
+    try:
+        result = trader.place_missing_gtc_orders()
+        if result['success']:
+            flash(f"✅ {result['message']}", 'success')
+            if result.get('placed', 0) > 0:
+                trader.db.log_daily_action(
+                    'PLACE_MISSING_GTC',
+                    f"Placed {result['placed']} missing GTC orders via web interface",
+                    True
+                )
+        else:
+            flash(f"❌ {result['message']}", 'error')
+    except Exception as e:
+        flash(f'Error placing missing GTC orders: {e}', 'error')
+    
+    return redirect(url_for('dashboard'))
+
+@app.route('/get_pnl_data')
+def get_pnl_data():
+    """Get current P&L data from streaming market data (AJAX endpoint)"""
+    trader = get_trader()
+    if not trader:
+        return jsonify({'error': 'System not ready'}), 503
+    
+    try:
+        active_trades = trader.db.get_active_trades()
+        pnl_data = []
+        
+        for trade in active_trades:
+            if trade.status == "ACTIVE":
+                streaming_result = trader.get_streaming_pnl(trade.trade_id)
+                
+                if streaming_result:
+                    current_spread_price, unrealized_pnl = streaming_result
+                else:
+                    current_spread_price = trade.current_value if hasattr(trade, 'current_value') and trade.current_value else 0.0
+                    unrealized_pnl = trade.unrealized_pnl if hasattr(trade, 'unrealized_pnl') and trade.unrealized_pnl else 0.0
+                
+                pnl_per_contract = 0.0
+                pnl_total = 0.0
+                pnl_percentage = 0.0
+                
+                if unrealized_pnl != 0:
+                    pnl_per_contract = float(unrealized_pnl) * 100
+                    pnl_total = pnl_per_contract * trader.config.position_size
+                    pnl_percentage = (unrealized_pnl / abs(trade.entry_credit)) * 100
+                
+                pnl_data.append({
+                    'trade_id': trade.trade_id,
+                    'pnl_total': pnl_total,
+                    'pnl_per_contract': pnl_per_contract,
+                    'current_spread_price': current_spread_price,
+                    'unrealized_pnl': unrealized_pnl,
+                    'pnl_percentage': pnl_percentage,
+                    'has_pnl': unrealized_pnl != 0,
+                    'is_streaming': streaming_result is not None
+                })
+        
+        # Get SPX price
+        spx_price = 0.0
+        if trader.spx_stream_req_id and trader.spx_stream_req_id in trader.wrapper.streaming_data:
+            spx_data = trader.wrapper.streaming_data[trader.spx_stream_req_id]
+            spx_price = spx_data.get('price', trader.current_spx_price)
+        else:
+            spx_price = trader.current_spx_price
+        
+        return jsonify({
+            'success': True,
+            'pnl_data': pnl_data,
+            'spx_price': spx_price,
+            'timestamp': datetime.now().strftime('%H:%M:%S'),
+            'streaming_active': len(trader.streaming_positions) > 0
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def start_web_interface_thread(trader: SPXCalendarTrader, port=5000):
+    """Start Flask web interface in a background thread"""
+    # CRITICAL: Set global trader BEFORE starting Flask
+    set_global_trader(trader)
+    print(f"✅ Trader instance set for web interface")
+    
+    def run_flask():
+        try:
+            print(f"🌐 Starting web interface on http://localhost:{port}")
+            # Suppress Flask development server warnings
+            import logging
+            log = logging.getLogger('werkzeug')
+            log.setLevel(logging.ERROR)
+            
+            app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False, threaded=True)
+        except Exception as e:
+            print(f"❌ Web interface error: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Give Flask a moment to start
+    time.sleep(2)
+    print(f"✅ Web interface started on http://localhost:{port}")
+    
+    return flask_thread
+
+# ===============================================
 # MAIN ENTRY POINT
 # ===============================================
 
@@ -4418,13 +5264,16 @@ def main():
                 print("ERROR: Could not connect to IBKR for test")
                 
         else:  # auto mode
-            print("⏰ Starting automated scheduler...")
-            print("Will execute daily at 9:45 AM ET (M-F)")
-            print("Will check for time-based exits daily at 3:00 PM ET (M-F)")
-            print("Will reconcile positions daily at 5:00 PM ET (M-F)")
+            print("⏰ Starting unified trading system...")
+            print("   - Automated scheduler (9:45 AM, 3:00 PM, 5:00 PM ET)")
+            print("   - Web interface (http://localhost:5000)")
+            print("   - Single IBKR connection, single trader instance")
             print("TIP: Press Ctrl+C to stop, or use --mode manual for override menu")
             
-            # Start the scheduler (this will run indefinitely)
+            # Start web interface in background thread
+            start_web_interface_thread(trader, port=5000)
+            
+            # Start the scheduler (this will run indefinitely in main thread)
             trader.start_scheduler()
         
     except KeyboardInterrupt:

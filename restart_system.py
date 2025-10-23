@@ -44,27 +44,29 @@ def kill_existing_processes():
     else:
         print("ℹ️ No existing processes found")
 
-def restart_web_manager():
-    """Restart the web manager"""
-    print("\n🚀 Starting SPX Calendar Web Manager...")
+def restart_unified_system():
+    """Restart the unified trading system (includes web interface)"""
+    print("\n🚀 Starting Unified SPX Calendar System...")
     
     try:
         # Change to the script directory
         script_dir = os.path.dirname(os.path.abspath(__file__))
         os.chdir(script_dir)
         
-        # Start the web manager
-        if os.path.exists('spx_web_manager.py'):
-            subprocess.Popen([sys.executable, 'spx_web_manager.py'], 
+        # Start the unified system (trading + web interface)
+        if os.path.exists('spx_double_calendar.py'):
+            subprocess.Popen([sys.executable, 'spx_double_calendar.py'], 
                            creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0)
-            print("✅ Web manager started in new window")
+            print("✅ Unified system started in new window")
+            print("   - Trading engine + Web interface")
+            print("   - Single process, single IBKR connection")
             print("🌐 Access at: http://localhost:5000")
         else:
-            print("❌ spx_web_manager.py not found")
+            print("❌ spx_double_calendar.py not found")
             return False
             
     except Exception as e:
-        print(f"❌ Error starting web manager: {e}")
+        print(f"❌ Error starting unified system: {e}")
         return False
     
     return True
@@ -83,15 +85,15 @@ def main():
         print("\n⏳ Waiting 10 seconds for IBKR to release connections...")
         time.sleep(10)
         
-        # Step 3: Restart web manager
-        success = restart_web_manager()
+        # Step 3: Restart unified system
+        success = restart_unified_system()
         
         if success:
             print("\n✅ System restart completed!")
             print("📋 Next steps:")
             print("   1. Check web interface at http://localhost:5000")
             print("   2. Verify IBKR connection status")
-            print("   3. Use 'Repair GTC Orders' if needed")
+            print("   3. Check streaming is working (Live Price updates)")
             print("   4. Check system logs for any issues")
         else:
             print("\n❌ System restart failed!")
